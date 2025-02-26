@@ -34,7 +34,7 @@ pub trait StateMachine: Sized {
     ///
     /// # Panics
     /// This [Future] must be executed using a [Runner] rather than awaiting it normally. Any calls
-    /// to async methods or functions other than [Handle::pending] will panic.
+    /// to async methods or functions other than [Handle::yield_value] will panic.
     fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out> + Send;
 }
 
@@ -107,8 +107,8 @@ where
         }
     }
 
-    /// Store the response of a call to [Handle::pending] by the child [StateMachine].
-    pub fn set_recv(&self, r: R::Rcv) {
+    /// Send a response to a call to [Handle::yield_value] by the child [StateMachine].
+    pub fn send(&self, r: R::Rcv) {
         self.state.set_r(r);
     }
 }
@@ -119,7 +119,7 @@ pub enum Step<S, T>
 where
     S: Unpin,
 {
-    /// The [StateMachine] yielded via [Handle::pending]
+    /// The [StateMachine] yielded via [Handle::yield_value]
     Pending(S),
     /// The [StateMachine] is now complete
     Complete(T),
@@ -159,7 +159,7 @@ impl<S, R> State<S, R> {
             (*self.inner.get())
                 .s
                 .take()
-                .expect("a StateMachine awaited a future other than Handle::pending")
+                .expect("a StateMachine awaited a future other than Handle::yield_value")
         }
     }
 
@@ -236,7 +236,7 @@ where
 {
     /// Yield back to the [Runner] that owns the [StateMachine] calling this method, requesting
     /// it to map an `S` into and `R`.
-    pub async fn pending(&self, snd: S) -> R {
+    pub async fn yield_value(&self, snd: S) -> R {
         Yield {
             polled: false,
             s: Some(snd),

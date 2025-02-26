@@ -50,7 +50,7 @@ where
                 println!("{n} bytes requested");
                 let mut buf = vec![0; n];
                 r.read_exact(&mut buf)?;
-                runner.set_recv(buf);
+                runner.send(buf);
             }
         }
     }
@@ -73,7 +73,7 @@ where
                 println!("{n} bytes requested");
                 let mut buf = vec![0; n];
                 r.read_exact(&mut buf).await?;
-                runner.set_recv(buf);
+                runner.send(buf);
             }
         }
     }
@@ -117,7 +117,7 @@ where
 impl Read9p for u16 {
     async fn read_9p(handle: Handle<usize, Vec<u8>>) -> io::Result<Self> {
         let n = size_of::<u16>();
-        let buf = handle.pending(n).await;
+        let buf = handle.yield_value(n).await;
         let data = buf[0..n].try_into().unwrap();
 
         Ok(u16::from_le_bytes(data))
@@ -127,7 +127,7 @@ impl Read9p for u16 {
 impl Read9p for String {
     async fn read_9p(handle: Handle<usize, Vec<u8>>) -> io::Result<Self> {
         let len = u16::read_9p(handle).await? as usize;
-        let buf = handle.pending(len).await;
+        let buf = handle.yield_value(len).await;
 
         String::from_utf8(buf).map_err(|e| io::Error::new(ErrorKind::InvalidData, e.to_string()))
     }
