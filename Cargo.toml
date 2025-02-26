@@ -1,0 +1,10 @@
+[package]
+name = "crimes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+simple_test_case = "1"
+tokio =  { version = "1.43.0", features = ["macros", "net", "io-util", "rt", "sync", "time", "rt-multi-thread", "net", "io-util"] }
