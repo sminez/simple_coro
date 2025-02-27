@@ -36,90 +36,82 @@ pub trait StateMachine: Sized {
     /// This [Future] must be executed using a [Runner] rather than awaiting it normally. Any calls
     /// to async methods or functions other than [Handle::yield_value] will panic.
     fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out> + Send;
+
+    /// Initialize a new [PinnedStateMachine] with the provided [RunState].
+    fn initialize<R>(
+        inner: R,
+    ) -> PinnedStateMachine<R, Self::Out, impl Future<Output = Self::Out> + Send>
+    where
+        R: RunState<Snd = Self::Snd, Rcv = Self::Rcv>,
+    {
+        let state = Arc::new(State::default());
+        let waker = Waker::from(state.clone());
+
+        PinnedStateMachine {
+            inner,
+            state,
+            waker,
+            fut: Box::pin(Self::run(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
 }
 
 /// Additional unshared state for driving a [StateMachine] that is parameterised over the
 /// specified `Snd` and `Rcv` types.
-pub trait RunState {
+pub trait RunState: Sized {
     /// The type that will be sent from a [StateMachine] at each await point
     type Snd: Unpin + 'static;
     /// The type that will be returned to a [StateMachine] at each await point
     type Rcv: Unpin + 'static;
 }
 
-/// A wrapper around a given [RunState] for running [StateMachine]s to completion.
-#[derive(Debug)]
-pub struct Runner<R>
+/// A handle to a running [StateMachine] that can make progress by calling [step][PinnedStateMachine::step].
+#[allow(missing_debug_implementations)]
+pub struct PinnedStateMachine<R, O, F>
 where
     R: RunState,
+    F: Future<Output = O> + Send,
 {
     inner: R,
     state: Arc<State<R::Snd, R::Rcv>>,
     waker: Waker,
+    fut: Pin<Box<F>>,
 }
 
-impl<R> Runner<R>
+impl<R, O, F> PinnedStateMachine<R, O, F>
 where
     R: RunState,
+    F: Future<Output = O> + Send,
 {
-    /// Construct a new [Runner] from a given [RunState].
-    pub fn new(inner: R) -> Self {
-        let state = Arc::new(State::default());
-        let waker = Waker::from(state.clone());
-
-        Self {
-            inner,
-            state,
-            waker,
-        }
-    }
-
     /// Get a shared reference to the inner [RunState].
     pub fn inner(&self) -> &R {
         &self.inner
     }
 
     /// Get a exclusive reference to the inner [RunState].
-    pub fn inner_mut(&mut self) -> &R {
+    pub fn inner_mut(&mut self) -> &mut R {
         &mut self.inner
     }
 
-    /// Initialize a [PinnedStateMachine] that can be stepped by this [Runner].
-    pub fn init<T>(&self) -> PinnedStateMachine<T::Out, impl Future<Output = T::Out> + Send>
-    where
-        T: StateMachine<Snd = R::Snd, Rcv = R::Rcv>,
-    {
-        PinnedStateMachine(Box::pin(T::run(Handle {
-            _snd: PhantomData,
-            _rcv: PhantomData,
-        })))
-    }
-
-    /// Run a [StateMachine] to its next yield point.
-    // pub fn step<O, F>(&self, fut: &mut Pin<&mut F>) -> Step<R::Snd, O>
-    pub fn step<O, F>(&self, state_machine: &mut PinnedStateMachine<O, F>) -> Step<R::Snd, O>
-    where
-        F: Future<Output = O> + Send,
-    {
-        let fut = &mut state_machine.0;
+    /// Run the [StateMachine] to its next yield point.
+    pub fn step(&mut self) -> Step<R::Snd, O> {
         let mut ctx = Context::from_waker(&self.waker);
+        let fut = &mut self.fut;
+
         match fut.as_mut().poll(&mut ctx) {
             Poll::Ready(val) => Step::Complete(val),
             Poll::Pending => Step::Pending(self.state.take_s()),
         }
     }
 
-    /// Send a response to a call to [Handle::yield_value] by the child [StateMachine].
+    /// Send a response to the child [StateMachine] following a call to [Handle::yield_value].
     pub fn send(&self, r: R::Rcv) {
         self.state.set_r(r);
     }
 }
-
-/// A handle to a running [StateMachine] that can be passed to [Runner::step] to make progress.
-#[derive(Debug)]
-pub struct PinnedStateMachine<O, F>(Pin<Box<F>>)
-where
-    F: Future<Output = O> + Send;
 
 /// The intermediate state of a [StateMachine] while it is executing
 #[derive(Debug)]

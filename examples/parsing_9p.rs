@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format
-use crimes::{Handle, RunState, Runner, StateMachine, Step};
+use crimes::{Handle, RunState, StateMachine, Step};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
@@ -38,17 +38,15 @@ where
     T: Read9p,
     R: Read,
 {
-    let runner = Runner::new(NinepState);
-    let mut state_machine = runner.init::<NinepParser<T>>();
-
+    let mut state_machine = NinepParser::initialize(NinepState);
     loop {
-        match runner.step(&mut state_machine) {
+        match state_machine.step() {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");
                 let mut buf = vec![0; n];
                 r.read_exact(&mut buf)?;
-                runner.send(buf);
+                state_machine.send(buf);
             }
         }
     }
@@ -60,17 +58,15 @@ where
     T: Read9p,
     R: AsyncRead + Unpin,
 {
-    let runner = Runner::new(NinepState);
-    let mut state_machine = runner.init::<NinepParser<T>>();
-
+    let mut state_machine = NinepParser::initialize(NinepState);
     loop {
-        match runner.step(&mut state_machine) {
+        match state_machine.step() {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");
                 let mut buf = vec![0; n];
                 r.read_exact(&mut buf).await?;
-                runner.send(buf);
+                state_machine.send(buf);
             }
         }
     }
