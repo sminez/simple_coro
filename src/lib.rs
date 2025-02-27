@@ -84,22 +84,24 @@ where
         &mut self.inner
     }
 
-    /// Convert a [StateMachine] into a [Future] that can be stepped by this [Runner]
-    pub fn make_fut<T>(&self) -> impl Future<Output = T::Out> + Send
+    /// Initialize a [PinnedStateMachine] that can be stepped by this [Runner].
+    pub fn init<T>(&self) -> PinnedStateMachine<T::Out, impl Future<Output = T::Out> + Send>
     where
         T: StateMachine<Snd = R::Snd, Rcv = R::Rcv>,
     {
-        T::run(Handle {
+        PinnedStateMachine(Box::pin(T::run(Handle {
             _snd: PhantomData,
             _rcv: PhantomData,
-        })
+        })))
     }
 
     /// Run a [StateMachine] to its next yield point.
-    pub fn step<O, F>(&self, fut: &mut Pin<&mut F>) -> Step<R::Snd, O>
+    // pub fn step<O, F>(&self, fut: &mut Pin<&mut F>) -> Step<R::Snd, O>
+    pub fn step<O, F>(&self, state_machine: &mut PinnedStateMachine<O, F>) -> Step<R::Snd, O>
     where
         F: Future<Output = O> + Send,
     {
+        let fut = &mut state_machine.0;
         let mut ctx = Context::from_waker(&self.waker);
         match fut.as_mut().poll(&mut ctx) {
             Poll::Ready(val) => Step::Complete(val),
@@ -112,6 +114,12 @@ where
         self.state.set_r(r);
     }
 }
+
+/// A handle to a running [StateMachine] that can be passed to [Runner::step] to make progress.
+#[derive(Debug)]
+pub struct PinnedStateMachine<O, F>(Pin<Box<F>>)
+where
+    F: Future<Output = O> + Send;
 
 /// The intermediate state of a [StateMachine] while it is executing
 #[derive(Debug)]

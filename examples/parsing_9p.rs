@@ -4,7 +4,6 @@ use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
     marker::PhantomData,
-    pin::pin,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -40,11 +39,10 @@ where
     R: Read,
 {
     let runner = Runner::new(NinepState);
-    let fut = runner.make_fut::<NinepParser<T>>();
-    let mut fut = pin!(fut);
+    let mut state_machine = runner.init::<NinepParser<T>>();
 
     loop {
-        match runner.step(&mut fut) {
+        match runner.step(&mut state_machine) {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");
@@ -63,11 +61,10 @@ where
     R: AsyncRead + Unpin,
 {
     let runner = Runner::new(NinepState);
-    let fut = runner.make_fut::<NinepParser<T>>();
-    let mut fut = pin!(fut);
+    let mut state_machine = runner.init::<NinepParser<T>>();
 
     loop {
-        match runner.step(&mut fut) {
+        match runner.step(&mut state_machine) {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");

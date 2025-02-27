@@ -1,6 +1,6 @@
 // "use crimes" was too good to pass up
 use crimes::{Handle, RunState, Runner, StateMachine, Step};
-use std::{io, marker::PhantomData, pin::pin};
+use std::{io, marker::PhantomData};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 // The string "Hello, 世界" encoded in 9p binary format
@@ -24,9 +24,9 @@ async fn main() -> io::Result<()> {
 // This is what our blocking I/O read loop ends up looking like
 fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
     let runner = Runner::new(NinepState);
-    let mut fut = pin!(runner.make_fut::<NineP<T>>());
+    let mut state_machine = runner.init::<NineP<T>>();
     loop {
-        match runner.step(&mut fut) {
+        match runner.step(&mut state_machine) {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");
@@ -41,9 +41,9 @@ fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
 // This is what our non-blocking I/O read loop ends up looking like
 async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) -> io::Result<T> {
     let runner = Runner::new(NinepState);
-    let mut fut = pin!(runner.make_fut::<NineP<T>>());
+    let mut state_machine = runner.init::<NineP<T>>();
     loop {
-        match runner.step(&mut fut) {
+        match runner.step(&mut state_machine) {
             Step::Complete(res) => return res,
             Step::Pending(n) => {
                 println!("{n} bytes requested");
