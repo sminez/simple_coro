@@ -25,15 +25,17 @@ async fn main() -> io::Result<()> {
 fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
     let mut state_machine = NineP::initialize(NinepState);
     loop {
-        match state_machine.step() {
-            Step::Complete(res) => return res,
-            Step::Pending(n) => {
-                println!("{n} bytes requested");
-                let mut buf = vec![0; n];
-                r.read_exact(&mut buf)?;
-                state_machine.send(buf);
+        state_machine = {
+            match state_machine.step() {
+                Step::Complete(res) => return res,
+                Step::Pending(sm, n) => {
+                    println!("{n} bytes requested");
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf)?;
+                    sm.send(buf)
+                }
             }
-        }
+        };
     }
 }
 
@@ -41,15 +43,17 @@ fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
 async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) -> io::Result<T> {
     let mut state_machine = NineP::initialize(NinepState);
     loop {
-        match state_machine.step() {
-            Step::Complete(res) => return res,
-            Step::Pending(n) => {
-                println!("{n} bytes requested");
-                let mut buf = vec![0; n];
-                r.read_exact(&mut buf).await?;
-                state_machine.send(buf);
+        state_machine = {
+            match state_machine.step() {
+                Step::Complete(res) => return res,
+                Step::Pending(sm, n) => {
+                    println!("{n} bytes requested");
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf).await?;
+                    sm.send(buf)
+                }
             }
-        }
+        };
     }
 }
 

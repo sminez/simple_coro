@@ -13,6 +13,7 @@
 
 use std::{
     cell::UnsafeCell,
+    fmt,
     future::Future,
     marker::PhantomData,
     pin::Pin,
@@ -23,24 +24,24 @@ use std::{
 /// A strongly typed state machine that can send values back to a parent [Runner] each time it
 /// yields, receiving a response in return.
 pub trait StateMachine: Sized {
-    /// The type that will be sent to the parent [Runner] at each await point
+    /// The type that will be sent at each await point
     type Snd: Unpin + 'static;
-    /// The type that will be received from the parent [Runner] at each await point
+    /// The type expected to be received at each await point
     type Rcv: Unpin + 'static;
     /// The output of running this state machine to completion
     type Out;
 
-    /// Return a future that can be executed by a [Runner] to run this state machine to completion.
+    /// Return a future that can be executed by calling [StateMachine::initialize] to convert this
+    /// type into a [PinnedStateMachine] that can be run to completeion.
     ///
     /// # Panics
-    /// This [Future] must be executed using a [Runner] rather than awaiting it normally. Any calls
-    /// to async methods or functions other than [Handle::yield_value] will panic.
+    /// Any calls to async methods or functions other than [Handle::yield_value] will panic.
     fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out> + Send;
 
     /// Initialize a new [PinnedStateMachine] with the provided [RunState].
     fn initialize<R>(
         inner: R,
-    ) -> PinnedStateMachine<R, Self::Out, impl Future<Output = Self::Out> + Send>
+    ) -> PinnedStateMachine<R, Self::Out, impl Future<Output = Self::Out> + Send, Ready>
     where
         R: RunState<Snd = Self::Snd, Rcv = Self::Rcv>,
     {
@@ -49,6 +50,7 @@ pub trait StateMachine: Sized {
 
         PinnedStateMachine {
             inner,
+            _lifecyle: Ready,
             state,
             waker,
             fut: Box::pin(Self::run(Handle {
@@ -68,23 +70,51 @@ pub trait RunState: Sized {
     type Rcv: Unpin + 'static;
 }
 
+/// The lifecycle state of a running [StateMachine]: either [Pending] or [Ready].
+pub trait Lifecycle: fmt::Debug {}
+
+/// Ready for the next call to [PinnedStateMachine::step]
+#[derive(Debug)]
+pub struct Ready;
+impl Lifecycle for Ready {}
+
+/// Awaiting a call to [PinnedStateMachine::send] to reply to the inner [StateMachine].
+#[derive(Debug)]
+pub struct Pending;
+impl Lifecycle for Pending {}
+
 /// A handle to a running [StateMachine] that can make progress by calling [step][PinnedStateMachine::step].
-#[allow(missing_debug_implementations)]
-pub struct PinnedStateMachine<R, O, F>
+pub struct PinnedStateMachine<R, O, F, L>
 where
     R: RunState,
     F: Future<Output = O> + Send,
+    L: Lifecycle,
 {
     inner: R,
+    _lifecyle: L,
     state: Arc<State<R::Snd, R::Rcv>>,
     waker: Waker,
     fut: Pin<Box<F>>,
 }
 
-impl<R, O, F> PinnedStateMachine<R, O, F>
+impl<R, O, F, L> fmt::Debug for PinnedStateMachine<R, O, F, L>
 where
     R: RunState,
     F: Future<Output = O> + Send,
+    L: Lifecycle,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PinnedStateMachine")
+            .field("lifecycle", &self._lifecyle)
+            .finish()
+    }
+}
+
+impl<R, O, F, L> PinnedStateMachine<R, O, F, L>
+where
+    R: RunState,
+    F: Future<Output = O> + Send,
+    L: Lifecycle,
 {
     /// Get a shared reference to the inner [RunState].
     pub fn inner(&self) -> &R {
@@ -95,32 +125,64 @@ where
     pub fn inner_mut(&mut self) -> &mut R {
         &mut self.inner
     }
+}
 
+impl<R, O, F> PinnedStateMachine<R, O, F, Ready>
+where
+    R: RunState,
+    F: Future<Output = O> + Send,
+{
     /// Run the [StateMachine] to its next yield point.
-    pub fn step(&mut self) -> Step<R::Snd, O> {
+    #[allow(clippy::type_complexity)]
+    pub fn step(mut self) -> Step<R::Snd, O, R, F> {
         let mut ctx = Context::from_waker(&self.waker);
-        let fut = &mut self.fut;
-
-        match fut.as_mut().poll(&mut ctx) {
+        match self.fut.as_mut().poll(&mut ctx) {
             Poll::Ready(val) => Step::Complete(val),
-            Poll::Pending => Step::Pending(self.state.take_s()),
+            Poll::Pending => {
+                let s = self.state.take_s();
+                let sm = PinnedStateMachine {
+                    inner: self.inner,
+                    _lifecyle: Pending,
+                    state: self.state,
+                    waker: self.waker,
+                    fut: self.fut,
+                };
+
+                Step::Pending(sm, s)
+            }
         }
     }
+}
 
+impl<R, O, F> PinnedStateMachine<R, O, F, Pending>
+where
+    R: RunState,
+    F: Future<Output = O> + Send,
+{
     /// Send a response to the child [StateMachine] following a call to [Handle::yield_value].
-    pub fn send(&self, r: R::Rcv) {
+    pub fn send(self, r: R::Rcv) -> PinnedStateMachine<R, O, F, Ready> {
         self.state.set_r(r);
+
+        PinnedStateMachine {
+            inner: self.inner,
+            _lifecyle: Ready,
+            state: self.state,
+            waker: self.waker,
+            fut: self.fut,
+        }
     }
 }
 
 /// The intermediate state of a [StateMachine] while it is executing
 #[derive(Debug)]
-pub enum Step<S, T>
+pub enum Step<S, T, R, F>
 where
     S: Unpin,
+    R: RunState,
+    F: Future<Output = T> + Send,
 {
     /// The [StateMachine] yielded via [Handle::yield_value]
-    Pending(S),
+    Pending(PinnedStateMachine<R, T, F, Pending>, S),
     /// The [StateMachine] is now complete
     Complete(T),
 }
@@ -139,22 +201,22 @@ impl<S, R> Default for State<S, R> {
 }
 
 /// SAFETY: We only ever access the shared state held within our [UnsafeCell] from a [StateMachine]
-/// or its parent [Runner] which never execute at the same time.
+/// or inside of [PinnedStateMachine::step] which never execute at the same time.
 unsafe impl<S, R> Send for State<S, R> {}
 /// SAFETY: We only ever access the shared state held within our [UnsafeCell] from a [StateMachine]
-/// or its parent [Runner] which never execute at the same time.
+/// or inside of [PinnedStateMachine::step] which never execute at the same time.
 unsafe impl<S, R> Sync for State<S, R> {}
 
 impl<S, R> State<S, R> {
     fn set_s(&self, s: S) {
         // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // StateMachine or its parent Runner which never execute at the same time.
+        // or inside of PinnedStateMachine::step which never execute at the same time.
         unsafe { (*self.inner.get()).s = Some(s) };
     }
 
     fn take_s(&self) -> S {
         // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // StateMachine or its parent Runner which never execute at the same time.
+        // or inside of PinnedStateMachine::step which never execute at the same time.
         unsafe {
             (*self.inner.get())
                 .s
@@ -165,18 +227,19 @@ impl<S, R> State<S, R> {
 
     fn set_r(&self, r: R) {
         // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // StateMachine or its parent Runner which never execute at the same time.
+        // or inside of PinnedStateMachine::step which never execute at the same time.
         unsafe { (*self.inner.get()).r = Some(r) };
     }
 
     fn take_r(&self) -> R {
         // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // StateMachine or its parent Runner which never execute at the same time.
+        // or inside of PinnedStateMachine::step which never execute at the same time.
         unsafe {
             (*self.inner.get())
                 .r
                 .take()
-                .expect("a Runner failed to set shared state before calling step")
+                // should not be possible
+                .expect("shared state was not set before calling step")
         }
     }
 }
@@ -198,9 +261,9 @@ impl<S, R> Wake for State<S, R> {
     fn wake_by_ref(self: &Arc<Self>) {}
 }
 
-/// A yield handle to facilitate communication between a [StateMachine] and its parent [Runner].
+/// A yield handle to facilitate communication between a [PinnedStateMachine] and the logic driving it.
 ///
-/// The only way to obtain a [Handle] is via the [Runner::make_fut] method which will pass one to
+/// The only way to obtain a [Handle] is via the [StateMachine::initialize] method which will pass one to
 /// [StateMachine::run] in order to construct the state machine future.
 #[derive(Debug)]
 pub struct Handle<S, R>
@@ -234,8 +297,8 @@ where
     S: Unpin + 'static,
     R: Unpin + 'static,
 {
-    /// Yield back to the [Runner] that owns the [StateMachine] calling this method, requesting
-    /// it to map an `S` into and `R`.
+    /// Yield back to the code that owns the [StateMachine] calling this method, requesting it to
+    /// map an `S` into and `R`.
     pub async fn yield_value(&self, snd: S) -> R {
         Yield {
             polled: false,

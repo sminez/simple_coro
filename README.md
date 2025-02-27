@@ -7,26 +7,24 @@ Use crimes to write ergonomic state machines using futures.
 
 After writing my [Socrates is a state machine][0] blog post I couldn't resist trying to simplify the API,
 so rather than what is presented there (a paired runner and state machine) the updated API now handles
-everything with a single struct: `PinnedStateMachine`:
+everything with a single struct: `PinnedStateMachine`. It also enforces that replies are sent before
+calling `step` again via a lifecycle typestate.
 
 ```rust
-fn read_9p_sync_from_bytes<T, R>(r: &mut R) -> io::Result<T>
-where
-    T: Read9p,
-    R: Read,
-{
-    let mut state_machine = NinepParser::initialize(NinepState); // This is a PinnedStateMachine
-
+fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
+    let mut state_machine = NineP::initialize(NinepState);
     loop {
-        match state_machine.step() {
-            Step::Complete(res) => return res,
-            Step::Pending(n) => {
-                println!("{n} bytes requested");
-                let mut buf = vec![0; n];
-                r.read_exact(&mut buf)?;
-                state_machine.send(buf);
+        state_machine = {
+            match state_machine.step() {
+                Step::Complete(res) => return res,
+                Step::Pending(sm, n) => {
+                    println!("{n} bytes requested");
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf)?;
+                    sm.send(buf)
+                }
             }
-        }
+        };
     }
 }
 ```
