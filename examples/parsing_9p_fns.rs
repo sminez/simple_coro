@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format using free async functions
-use crimes::{Handle, IntoStateFn, RunState, StateFn, Step};
+use crimes::{Coro, Handle, Ready, StateFn, Step};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
@@ -37,7 +37,7 @@ where
     T: Read9p,
     R: Read,
 {
-    let mut state_machine = (T::state_fn()).initialize(NinepState);
+    let mut state_machine = T::init();
     loop {
         state_machine = {
             match state_machine.step() {
@@ -59,7 +59,7 @@ where
     T: Read9p,
     R: AsyncRead + Unpin,
 {
-    let mut state_machine = (T::state_fn()).initialize(NinepState);
+    let mut state_machine = T::init();
     loop {
         state_machine = {
             match state_machine.step() {
@@ -73,14 +73,6 @@ where
             }
         };
     }
-}
-
-/// An impl of [RunState] for running 9p parsing [StateMachine]s
-#[derive(Default)]
-struct NinepState;
-impl RunState for NinepState {
-    type Snd = usize;
-    type Rcv = Vec<u8>;
 }
 
 async fn read_9p_u16(handle: Handle<usize, Vec<u8>>) -> io::Result<u16> {
@@ -110,6 +102,12 @@ async fn read_9p_vec<T: Read9p>(handle: Handle<usize, Vec<u8>>) -> io::Result<Ve
 
 trait Read9p: Sized {
     fn state_fn() -> StateFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send>;
+
+    fn init()
+    -> Coro<Vec<u8>, io::Result<Self>, impl Future<Output = io::Result<Self>> + Send, Ready, usize>
+    {
+        Self::state_fn().into()
+    }
 }
 
 macro_rules! impl_read9p {

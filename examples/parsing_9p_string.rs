@@ -1,5 +1,5 @@
 // "use crimes" was too good to pass up
-use crimes::{Handle, RunState, StateMachine, Step};
+use crimes::{Handle, StateMachine, Step};
 use std::{io, marker::PhantomData};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -23,7 +23,7 @@ async fn main() -> io::Result<()> {
 
 // This is what our blocking I/O read loop ends up looking like
 fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
-    let mut state_machine = NineP::initialize(NinepState);
+    let mut state_machine = NineP::initialize();
     loop {
         state_machine = {
             match state_machine.step() {
@@ -41,7 +41,7 @@ fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
 
 // This is what our non-blocking I/O read loop ends up looking like
 async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) -> io::Result<T> {
-    let mut state_machine = NineP::initialize(NinepState);
+    let mut state_machine = NineP::initialize();
     loop {
         state_machine = {
             match state_machine.step() {
@@ -55,13 +55,6 @@ async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) ->
             }
         };
     }
-}
-
-// We don't need anything special for our run state so we can just use an empty struct
-struct NinepState;
-impl RunState for NinepState {
-    type Snd = usize;
-    type Rcv = Vec<u8>;
 }
 
 // Defining a wrapper trait lets us implement it directly on the types we care about even if we
