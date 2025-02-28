@@ -17,8 +17,7 @@ use std::{
     future::Future,
     marker::PhantomData,
     pin::Pin,
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
 /// A future that can be executed by calling [StateMachine::initialize] to convert this
@@ -43,13 +42,11 @@ pub trait StateMachine: Sized {
     ///
     /// # Panics
     /// Any calls to async methods or functions other than [Handle::yield_value] will panic.
-    fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out> + Send;
+    fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
     /// Initialize a new [Coro].
-    fn initialize()
-    -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out> + Send, Self::Snd> {
-        let state = Arc::new(State::default());
-        let waker = Waker::from(state.clone());
+    fn initialize() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+        let (state, waker) = init_state();
 
         Coro {
             _lifecyle: Ready,
@@ -87,13 +84,49 @@ pub struct Coro<R, O, F, L, S>
 where
     R: Unpin + 'static,
     S: Unpin + 'static,
-    F: Future<Output = O> + Send,
+    F: Future<Output = O>,
     L: Lifecycle,
 {
     _lifecyle: L,
-    state: Arc<State<S, R>>,
+    state: StatePtr<S, R>,
     waker: Waker,
     fut: Pin<Box<F>>,
+}
+
+struct StatePtr<S, R>(*const State<S, R>)
+where
+    R: Unpin + 'static,
+    S: Unpin + 'static;
+
+/// SAFETY: a StatePtr is only ever wrapping a pointer on the heap that is shared between a
+/// Coro and the StateFn it holds
+unsafe impl<S, R> Send for StatePtr<S, R>
+where
+    R: Send + Unpin + 'static,
+    S: Send + Unpin + 'static,
+{
+}
+
+/// SAFETY: a StatePtr is only ever wrapping a pointer on the heap that is shared between a
+/// Coro and the StateFn it holds
+unsafe impl<S, R> Sync for StatePtr<S, R>
+where
+    R: Sync + Unpin + 'static,
+    S: Sync + Unpin + 'static,
+{
+}
+
+impl<S, R> Drop for StatePtr<S, R>
+where
+    R: Unpin + 'static,
+    S: Unpin + 'static,
+{
+    fn drop(&mut self) {
+        // SAFETY: the only other copies of this pointer are in the StateFn that is being
+        // dropped at the same time and it is not currently running if we are dropping the
+        // Coro containing it.
+        unsafe { std::ptr::drop_in_place(self.0 as *mut State<S, R>) };
+    }
 }
 
 impl<R, O, F, L, S> fmt::Debug for Coro<R, O, F, L, S>
@@ -123,7 +156,15 @@ where
         match self.fut.as_mut().poll(&mut ctx) {
             Poll::Ready(val) => Step::Complete(val),
             Poll::Pending => {
-                let s = self.state.take_s();
+                // SAFETY: We only ever access the shared state held within our UnsafeCell from a
+                // or inside of Coro::step which never execute at the same time.
+                let s = unsafe {
+                    (*(*self.state.0).inner.get())
+                        .s
+                        .take()
+                        .expect("a StateMachine awaited a future other than Handle::yield_value")
+                };
+
                 let sm = Coro {
                     _lifecyle: Pending,
                     state: self.state,
@@ -141,11 +182,13 @@ impl<R, O, F, S> Coro<R, O, F, Pending, S>
 where
     R: Unpin + 'static,
     S: Unpin + 'static,
-    F: Future<Output = O> + Send,
+    F: Future<Output = O>,
 {
     /// Send a response to the child [StateMachine] following a call to [Handle::yield_value].
     pub fn send(self, r: R) -> ReadyCoro<R, O, F, S> {
-        self.state.set_r(r);
+        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
+        // or inside of Coro::step which never execute at the same time.
+        unsafe { (*(*self.state.0).inner.get()).r = Some(r) };
 
         Coro {
             _lifecyle: Ready,
@@ -157,12 +200,12 @@ where
 }
 
 /// The intermediate state of a [StateMachine] while it is executing
-#[derive(Debug)]
+#[allow(missing_debug_implementations)]
 pub enum Step<S, T, R, F>
 where
     S: Unpin + 'static,
     R: Unpin + 'static,
-    F: Future<Output = T> + Send,
+    F: Future<Output = T>,
 {
     /// The [StateMachine] yielded via [Handle::yield_value]
     Pending(PendingCoro<R, T, F, S>, S),
@@ -183,50 +226,6 @@ impl<S, R> Default for State<S, R> {
     }
 }
 
-/// SAFETY: We only ever access the shared state held within our [UnsafeCell] from a [StateMachine]
-/// or inside of [Coro::step] which never execute at the same time.
-unsafe impl<S, R> Send for State<S, R> {}
-/// SAFETY: We only ever access the shared state held within our [UnsafeCell] from a [StateMachine]
-/// or inside of [Coro::step] which never execute at the same time.
-unsafe impl<S, R> Sync for State<S, R> {}
-
-impl<S, R> State<S, R> {
-    fn set_s(&self, s: S) {
-        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // or inside of Coro::step which never execute at the same time.
-        unsafe { (*self.inner.get()).s = Some(s) };
-    }
-
-    fn take_s(&self) -> S {
-        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // or inside of Coro::step which never execute at the same time.
-        unsafe {
-            (*self.inner.get())
-                .s
-                .take()
-                .expect("a StateMachine awaited a future other than Handle::yield_value")
-        }
-    }
-
-    fn set_r(&self, r: R) {
-        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // or inside of Coro::step which never execute at the same time.
-        unsafe { (*self.inner.get()).r = Some(r) };
-    }
-
-    fn take_r(&self) -> R {
-        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // or inside of Coro::step which never execute at the same time.
-        unsafe {
-            (*self.inner.get())
-                .r
-                .take()
-                // should not be possible
-                .expect("shared state was not set before calling step")
-        }
-    }
-}
-
 #[derive(Debug)]
 struct StateInner<S, R> {
     s: Option<S>,
@@ -239,9 +238,21 @@ impl<S, R> Default for StateInner<S, R> {
     }
 }
 
-impl<S, R> Wake for State<S, R> {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
+const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(clone_callback, |_| {}, |_| {}, |_| {});
+unsafe fn clone_callback(ptr: *const ()) -> RawWaker {
+    RawWaker::new(ptr, &WAKER_VTABLE)
+}
+
+fn init_state<S, R>() -> (StatePtr<S, R>, Waker)
+where
+    R: Unpin + 'static,
+    S: Unpin + 'static,
+{
+    let state = Box::into_raw(Box::new(State::default()));
+    // SAFETY: we never use this waker for its intended purpose
+    let waker = unsafe { Waker::from_raw(RawWaker::new(state as *mut (), &WAKER_VTABLE)) };
+
+    (StatePtr(state), waker)
 }
 
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
@@ -312,22 +323,33 @@ where
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<R> {
         if self.polled {
             // SAFETY: we can only poll this future using a waker wrapping State<S, R>
+            // and we only ever access the shared state held within our UnsafeCell from a
+            // or inside of Coro::step which never execute at the same time.
             let data = unsafe {
-                (ctx.waker().data() as *mut () as *mut State<S, R>)
+                (*(ctx.waker().data() as *mut () as *mut State<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
-                    .take_r()
+                    .inner
+                    .get())
+                .r
+                .take()
+                // should not be possible
+                .expect("shared state was not set before calling step")
             };
 
             Poll::Ready(data)
         } else {
             self.polled = true;
             // SAFETY: we can only poll this future using a waker wrapping State<S, R>
+            // and we only ever access the shared state held within our UnsafeCell from a
+            // or inside of Coro::step which never execute at the same time.
             unsafe {
-                (ctx.waker().data() as *mut () as *mut State<S, R>)
+                (*(ctx.waker().data() as *mut () as *mut State<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
-                    .set_s(self.s.take().unwrap_unchecked());
+                    .inner
+                    .get())
+                .s = Some(self.s.take().unwrap_unchecked());
             };
 
             Poll::Pending
@@ -340,11 +362,10 @@ where
     F: Fn(Handle<S, R>) -> Fut,
     S: Unpin + 'static,
     R: Unpin + 'static,
-    Fut: Future<Output = O> + Send,
+    Fut: Future<Output = O>,
 {
     fn from(f: F) -> Self {
-        let state = Arc::new(State::default());
-        let waker = Waker::from(state.clone());
+        let (state, waker) = init_state();
 
         Coro {
             _lifecyle: Ready,
@@ -368,15 +389,13 @@ pub trait IntoStateFn: Sized {
     type Out;
 
     /// Provide a [StateFn] to run as the state machine
-    fn into_state_fn(self)
-    -> StateFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out> + Send>;
+    fn into_state_fn(self) -> StateFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
 
     /// Initialize a new [Coro].
     fn initialize(
         self,
-    ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out> + Send, Self::Snd> {
-        let state = Arc::new(State::default());
-        let waker = Waker::from(state.clone());
+    ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+        let (state, waker) = init_state();
 
         Coro {
             _lifecyle: Ready,
