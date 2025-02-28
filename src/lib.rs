@@ -21,6 +21,67 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
+/// A future that can be executed by calling [IntoStateFn::initialize] to convert this
+/// type into a [PinnedStateMachine] that can be run to completeion.
+///
+/// # Panics
+/// Any calls to async methods or functions other than [Handle::yield_value] will panic.
+pub type StateFn<S, R, F> = fn(Handle<S, R>) -> F;
+
+impl<S, R, F, O> IntoStateFn for StateFn<S, R, F>
+where
+    S: Unpin + 'static,
+    R: Unpin + 'static,
+    F: Future<Output = O> + Send,
+{
+    type Snd = S;
+    type Rcv = R;
+    type Out = O;
+
+    fn into_state_fn(
+        self,
+    ) -> StateFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out> + Send> {
+        self
+    }
+}
+
+/// A type that can be converted into a [StateFn]
+pub trait IntoStateFn: Sized {
+    /// The type that will be sent at each await point
+    type Snd: Unpin + 'static;
+    /// The type expected to be received at each await point
+    type Rcv: Unpin + 'static;
+    /// The output of running this state machine to completion
+    type Out;
+
+    /// Provide a [StateFn] to run as the state machine
+    fn into_state_fn(self)
+    -> StateFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out> + Send>;
+
+    /// Initialize a new [PinnedStateMachine] with the provided [RunState].
+    fn initialize<R>(
+        self,
+        inner: R,
+    ) -> PinnedStateMachine<R, Self::Out, impl Future<Output = Self::Out> + Send, Ready>
+    where
+        R: RunState<Snd = Self::Snd, Rcv = Self::Rcv>,
+    {
+        let state = Arc::new(State::default());
+        let waker = Waker::from(state.clone());
+
+        PinnedStateMachine {
+            inner,
+            _lifecyle: Ready,
+            state,
+            waker,
+            fut: Box::pin((self.into_state_fn())(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
+}
+
 /// A strongly typed state machine that can send values back to a parent [Runner] each time it
 /// yields, receiving a response in return.
 pub trait StateMachine: Sized {
