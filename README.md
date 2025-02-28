@@ -11,8 +11,12 @@ everything with a single struct: `PinnedStateMachine`. It also enforces that rep
 calling `step` again via a lifecycle typestate.
 
 ```rust
-fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
-    let mut state_machine = NineP::initialize(NinepState);
+fn read_9p_sync_from_bytes<T, R>(r: &mut R) -> io::Result<T>
+where
+    T: Read9p,
+    R: Read,
+{
+    let mut state_machine = NinepParser::initialize();
     loop {
         state_machine = {
             match state_machine.step() {
