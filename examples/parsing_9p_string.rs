@@ -1,5 +1,5 @@
 // "use crimes" was too good to pass up
-use crimes::{Handle, StateMachine, Step};
+use crimes::{AsCoro, CoroState, Handle};
 use std::{io, marker::PhantomData};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -26,9 +26,9 @@ fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
     let mut state_machine = NineP::initialize();
     loop {
         state_machine = {
-            match state_machine.step() {
-                Step::Complete(res) => return res,
-                Step::Pending(sm, n) => {
+            match state_machine.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(sm, n) => {
                     println!("{n} bytes requested");
                     let mut buf = vec![0; n];
                     r.read_exact(&mut buf)?;
@@ -44,9 +44,9 @@ async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) ->
     let mut state_machine = NineP::initialize();
     loop {
         state_machine = {
-            match state_machine.step() {
-                Step::Complete(res) => return res,
-                Step::Pending(sm, n) => {
+            match state_machine.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(sm, n) => {
                     println!("{n} bytes requested");
                     let mut buf = vec![0; n];
                     r.read_exact(&mut buf).await?;
@@ -66,12 +66,12 @@ trait Read9p: Sized {
 // But when it comes to implementing StateMachine, we need to use a wrapper type to avoid the
 // orphan rule
 struct NineP<T>(PhantomData<T>);
-impl<T: Read9p> StateMachine for NineP<T> {
+impl<T: Read9p> AsCoro for NineP<T> {
     type Snd = usize;
     type Rcv = Vec<u8>;
     type Out = io::Result<T>;
 
-    async fn run(handle: Handle<usize, Vec<u8>>) -> io::Result<T> {
+    async fn as_coro(handle: Handle<usize, Vec<u8>>) -> io::Result<T> {
         T::read_9p(handle).await
     }
 }
@@ -87,7 +87,7 @@ impl Read9p for u16 {
 
 impl Read9p for String {
     async fn read_9p(handle: Handle<usize, Vec<u8>>) -> io::Result<String> {
-        let len = NineP::<u16>::run(handle).await? as usize;
+        let len = NineP::<u16>::as_coro(handle).await? as usize;
         let buf = handle.yield_value(len).await;
         String::from_utf8(buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))

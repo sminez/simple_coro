@@ -1,4 +1,4 @@
-use crimes::{Coro, Handle, ReadyCoro, Step};
+use crimes::{Coro, CoroState, Handle, ReadyCoro};
 
 #[test]
 fn coro_from_closure_works() {
@@ -6,17 +6,17 @@ fn coro_from_closure_works() {
         assert_eq!("pong", handle.yield_value("ping").await);
     });
 
-    coro = match coro.step() {
-        Step::Pending(c, ping) => {
+    coro = match coro.resume() {
+        CoroState::Pending(c, ping) => {
             assert_eq!(ping, "ping");
             c.send("pong")
         }
-        Step::Complete(()) => panic!("expected pending"),
+        CoroState::Complete(()) => panic!("expected pending"),
     };
 
-    match coro.step() {
-        Step::Pending(_, _) => panic!("expected complete"),
-        Step::Complete(()) => (),
+    match coro.resume() {
+        CoroState::Pending(_, _) => panic!("expected complete"),
+        CoroState::Complete(()) => (),
     };
 }
 
@@ -38,9 +38,9 @@ fn closures_capturing_referece_work() {
     let mut coro = double_nums(&[1, 2, 3]);
     loop {
         coro = {
-            match coro.step() {
-                Step::Pending(c, n) => c.send(n * 2),
-                Step::Complete(res) => {
+            match coro.resume() {
+                CoroState::Pending(c, n) => c.send(n * 2),
+                CoroState::Complete(res) => {
                     assert_eq!(res, "done");
                     return;
                 }

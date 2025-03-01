@@ -19,16 +19,15 @@ use std::{
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
-/// A future that can be executed by calling [StateMachine::initialize] to convert this
-/// type into a [Coro] that can be run to completeion.
+/// A future that can be executed as a [Coro].
+/// See [AsCoro] and [IntoCoro] for details.
 ///
 /// # Panics
-/// Any calls to async methods or functions other than [Handle::yield_value] will panic.
-pub type StateFn<S, R, F> = fn(Handle<S, R>) -> F;
+/// Any calls to async methods or functions other than those provided by [Handle] will panic.
+pub type GenFn<S, R, F> = fn(Handle<S, R>) -> F;
 
-/// A strongly typed state machine that can send values back to a caller each time it yields,
-/// receiving a response in return.
-pub trait StateMachine: Sized {
+/// A type that can construct a [Coro]
+pub trait AsCoro: Sized {
     /// The type that will be sent at each await point
     type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
@@ -36,19 +35,65 @@ pub trait StateMachine: Sized {
     /// The output of running this state machine to completion
     type Out;
 
-    /// Return a future that can be executed by calling [StateMachine::initialize] to convert this
+    /// Return a future that can be executed by calling [AsCoro::initialize] to convert this
     /// type into a [Coro] that can be run to completeion.
     ///
     /// # Panics
-    /// Any calls to async methods or functions other than [Handle::yield_value] will panic.
-    fn run(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
+    /// Any calls to async methods or functions other than those provided by [Handle] will panic.
+    fn as_coro(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
-    /// Initialize a new [Coro].
+    /// Initialize a new [Coro] using this type as a constructor.
     fn initialize() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
         Coro {
             _lifecyle: Ready,
-            state: State::default(),
-            fut: Box::pin(Self::run(Handle {
+            state: SharedState::default(),
+            fut: Box::pin(Self::as_coro(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
+}
+
+/// A type that can be converted into a [Coro] from a value.
+pub trait IntoCoro: Sized {
+    /// The type that will be sent at each await point
+    type Snd: Unpin + 'static;
+    /// The type expected to be received at each await point
+    type Rcv: Unpin + 'static;
+    /// The output of running this state machine to completion
+    type Out;
+
+    /// Provide a [GenFn] to run as a [Coro].
+    fn into_state_fn(self) -> GenFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
+
+    /// Initialize a new [Coro] from a value.
+    fn initialize(
+        self,
+    ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+        Coro {
+            _lifecyle: Ready,
+            state: SharedState::default(),
+            fut: Box::pin((self.into_state_fn())(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
+}
+
+impl<F, S, R, Fut, O> From<F> for ReadyCoro<R, O, Fut, S>
+where
+    F: Fn(Handle<S, R>) -> Fut,
+    S: Unpin + 'static,
+    R: Unpin + 'static,
+    Fut: Future<Output = O>,
+{
+    fn from(f: F) -> Self {
+        Coro {
+            _lifecyle: Ready,
+            state: SharedState::default(),
+            fut: Box::pin((f)(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
             })),
@@ -57,37 +102,37 @@ pub trait StateMachine: Sized {
 }
 
 #[derive(Debug)]
-struct State<S, R> {
+struct SharedState<S, R> {
     s: Option<S>,
     r: Option<R>,
 }
 
-impl<S, R> Default for State<S, R> {
+impl<S, R> Default for SharedState<S, R> {
     fn default() -> Self {
         Self { s: None, r: None }
     }
 }
 
-/// The lifecycle state of a running [StateMachine]: either [Pending] or [Ready].
+/// The lifecycle state of a running [AsCoro]: either [Pending] or [Ready].
 pub trait Lifecycle: fmt::Debug {}
 
-/// Ready for the next call to [Coro::step]
+/// Ready for the next call to [Coro::resume]
 #[derive(Debug)]
 pub struct Ready;
 impl Lifecycle for Ready {}
 
-/// Awaiting a call to [Coro::send] to reply to the inner [StateMachine].
+/// Awaiting a call to [Coro::send] to reply to the inner [AsCoro].
 #[derive(Debug)]
 pub struct Pending;
 impl Lifecycle for Pending {}
 
-/// A [Coro] that is ready to be stepped
+/// A [Coro] that is ready to be resumed
 pub type ReadyCoro<R, O, F, S> = Coro<R, O, F, Ready, S>;
 
 /// A [Coro] that is pending a response
 pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 
-/// A handle to a running [StateMachine] that can make progress by calling [step][Coro::step].
+/// A handle to a running [AsCoro] that can make progress by calling [resume][Coro::resume].
 pub struct Coro<R, O, F, L, S>
 where
     R: Unpin + 'static,
@@ -96,7 +141,7 @@ where
     L: Lifecycle,
 {
     _lifecyle: L,
-    state: State<S, R>,
+    state: SharedState<S, R>,
     fut: Pin<Box<F>>,
 }
 
@@ -119,30 +164,46 @@ unsafe fn clone_callback(ptr: *const ()) -> RawWaker {
     RawWaker::new(ptr, &WAKER_VTABLE)
 }
 
-impl<R, O, F, S> Coro<R, O, F, Ready, S>
+impl<R, O, Fut, S> Coro<R, O, Fut, Ready, S>
 where
     R: Unpin + 'static,
     S: Unpin + 'static,
-    F: Future<Output = O> + Send,
+    Fut: Future<Output = O> + Send,
 {
-    /// Run the [StateMachine] to its next yield point.
-    pub fn step(mut self) -> Step<S, O, R, F> {
+    /// Run this [Coro] to completion using the provided synchronous step function.
+    pub fn run_sync<F>(self, mut step_fn: F) -> O
+    where
+        F: FnMut(S) -> R,
+    {
+        let mut coro = self;
+        loop {
+            coro = {
+                match coro.resume() {
+                    CoroState::Complete(res) => return res,
+                    CoroState::Pending(c, s) => c.send((step_fn)(s)),
+                }
+            };
+        }
+    }
+
+    /// Run the [Coro] to its next yield point.
+    pub fn resume(mut self) -> CoroState<S, O, R, Fut> {
         // SAFETY: we never use this waker for its intended purpose
         let waker = unsafe {
             Waker::from_raw(RawWaker::new(
-                &self.state as *const State<S, R> as *const (),
+                &self.state as *const SharedState<S, R> as *const (),
                 &WAKER_VTABLE,
             ))
         };
         let mut ctx = Context::from_waker(&waker);
         match self.fut.as_mut().poll(&mut ctx) {
-            Poll::Ready(val) => Step::Complete(val),
+            Poll::Ready(val) => CoroState::Complete(val),
             Poll::Pending => {
                 let s = self
                     .state
                     .s
                     .take()
-                    .expect("a StateMachine awaited a future other than Handle::yield_value");
+                    .expect("a AsCoro awaited a future other than Handle::yield_value");
 
                 let sm = Coro {
                     _lifecyle: Pending,
@@ -150,7 +211,7 @@ where
                     fut: self.fut,
                 };
 
-                Step::Pending(sm, s)
+                CoroState::Pending(sm, s)
             }
         }
     }
@@ -162,7 +223,7 @@ where
     S: Unpin + 'static,
     F: Future<Output = O>,
 {
-    /// Send a response to the child [StateMachine] following a call to [Handle::yield_value].
+    /// Send a response to the child [AsCoro] following a call to [Handle::yield_value].
     pub fn send(mut self, r: R) -> ReadyCoro<R, O, F, S> {
         self.state.r = Some(r);
 
@@ -174,24 +235,24 @@ where
     }
 }
 
-/// The intermediate state of a [StateMachine] while it is executing
+/// The intermediate state of a [AsCoro] while it is executing
 #[allow(missing_debug_implementations)]
-pub enum Step<S, T, R, F>
+pub enum CoroState<S, T, R, F>
 where
     S: Unpin + 'static,
     R: Unpin + 'static,
     F: Future<Output = T>,
 {
-    /// The [StateMachine] yielded via [Handle::yield_value]
+    /// The [AsCoro] yielded via [Handle::yield_value]
     Pending(PendingCoro<R, T, F, S>, S),
-    /// The [StateMachine] is now complete
+    /// The [AsCoro] is now complete
     Complete(T),
 }
 
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
 ///
-/// The only way to obtain a [Handle] is via the [StateMachine::initialize] method which will pass one to
-/// [StateMachine::run] in order to construct the state machine future.
+/// The only way to obtain a [Handle] is via the [AsCoro::initialize] method which will pass one to
+/// [AsCoro::as_coro] in order to construct the state machine future.
 #[derive(Debug)]
 pub struct Handle<S, R>
 where
@@ -224,7 +285,7 @@ where
     S: Unpin + 'static,
     R: Unpin + 'static,
 {
-    /// Yield back to the code that owns the [StateMachine] calling this method, requesting it to
+    /// Yield back to the code that owns the [Coro] calling this method, requesting it to
     /// map an `S` into and `R`.
     pub async fn yield_value(&self, snd: S) -> R {
         Yield {
@@ -241,26 +302,7 @@ where
         C: Into<ReadyCoro<R, T, F, S>>,
         F: Future<Output = T> + Send,
     {
-        let fut = coro.into().fut;
-        AwaitableCoro { fut }.await
-    }
-}
-
-struct AwaitableCoro<O, F>
-where
-    F: Future<Output = O>,
-{
-    fut: Pin<Box<F>>,
-}
-
-impl<O, F> Future for AwaitableCoro<O, F>
-where
-    F: Future<Output = O>,
-{
-    type Output = O;
-
-    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.fut.as_mut().poll(ctx)
+        coro.into().fut.await
     }
 }
 
@@ -285,9 +327,9 @@ where
         if self.polled {
             // SAFETY: we can only poll this future using a waker wrapping State<S, R>
             // and we only ever access the shared state held within our UnsafeCell from a
-            // or inside of Coro::step which never execute at the same time.
+            // or inside of Coro::resume which never execute at the same time.
             let data = unsafe {
-                (ctx.waker().data() as *mut () as *mut State<S, R>)
+                (ctx.waker().data() as *mut () as *mut SharedState<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
                     .r
@@ -301,61 +343,15 @@ where
             self.polled = true;
             // SAFETY: we can only poll this future using a waker wrapping State<S, R>
             // and we only ever access the shared state held within our UnsafeCell from a
-            // or inside of Coro::step which never execute at the same time.
+            // or inside of Coro::resume which never execute at the same time.
             unsafe {
-                (ctx.waker().data() as *mut () as *mut State<S, R>)
+                (ctx.waker().data() as *mut () as *mut SharedState<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
                     .s = Some(self.s.take().unwrap_unchecked());
             };
 
             Poll::Pending
-        }
-    }
-}
-
-impl<F, S, R, Fut, O> From<F> for ReadyCoro<R, O, Fut, S>
-where
-    F: Fn(Handle<S, R>) -> Fut,
-    S: Unpin + 'static,
-    R: Unpin + 'static,
-    Fut: Future<Output = O>,
-{
-    fn from(f: F) -> Self {
-        Coro {
-            _lifecyle: Ready,
-            state: State::default(),
-            fut: Box::pin((f)(Handle {
-                _snd: PhantomData,
-                _rcv: PhantomData,
-            })),
-        }
-    }
-}
-
-/// A type that can be converted into a [StateFn]
-pub trait IntoStateFn: Sized {
-    /// The type that will be sent at each await point
-    type Snd: Unpin + 'static;
-    /// The type expected to be received at each await point
-    type Rcv: Unpin + 'static;
-    /// The output of running this state machine to completion
-    type Out;
-
-    /// Provide a [StateFn] to run as the state machine
-    fn into_state_fn(self) -> StateFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
-
-    /// Initialize a new [Coro].
-    fn initialize(
-        self,
-    ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
-        Coro {
-            _lifecyle: Ready,
-            state: State::default(),
-            fut: Box::pin((self.into_state_fn())(Handle {
-                _snd: PhantomData,
-                _rcv: PhantomData,
-            })),
         }
     }
 }

@@ -1,5 +1,5 @@
 //! Testing out support for closures
-use crimes::{Coro, Handle, ReadyCoro, Step};
+use crimes::{Coro, CoroState, Handle, ReadyCoro};
 
 fn double_nums(
     nums: &[usize],
@@ -21,13 +21,13 @@ fn main() {
 
     loop {
         state_machine = {
-            match state_machine.step() {
-                Step::Pending(sm, n) => {
+            match state_machine.resume() {
+                CoroState::Pending(sm, n) => {
                     println!("doubling {n}");
                     sm.send(n * 2)
                 }
 
-                Step::Complete(res) => {
+                CoroState::Complete(res) => {
                     println!("state machine finished with result={res:?}");
                     break;
                 }

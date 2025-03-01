@@ -1,5 +1,5 @@
-use crimes::{Coro, Handle, Step};
-use std::io::{self, Cursor, ErrorKind, Read};
+use crimes::{Coro, CoroState, Handle};
+use std::io::{self, Cursor, ErrorKind};
 
 // ["Hello", "世界"] in 9p wire format.
 const HELLO_WORLD: [u8; 17] = [
@@ -9,23 +9,39 @@ const HELLO_WORLD: [u8; 17] = [
 
 #[test]
 fn nested_yield_from_works() {
+    use std::io::Read;
+
     let mut r = Cursor::new(HELLO_WORLD.to_vec());
+    let parsed = Coro::from(read_9p_string_vec)
+        .run_sync(|n| {
+            let mut buf = vec![0; n];
+            r.read_exact(&mut buf).unwrap();
+            buf
+        })
+        .expect("parsing to be successful");
+
+    assert_eq!(parsed, &["Hello", "世界"]);
+}
+
+#[tokio::test]
+async fn nested_yield_from_works_async() {
+    use tokio::io::AsyncReadExt;
+
     let mut coro = Coro::from(read_9p_string_vec);
+    let mut r = Cursor::new(HELLO_WORLD.to_vec());
+
     loop {
         coro = {
-            match coro.step() {
-                Step::Pending(c, n) => {
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf).unwrap();
-                    c.send(buf)
-                }
-
-                Step::Complete(Err(e)) => panic!("parsing failed: {e}"),
-
-                Step::Complete(Ok(parsed)) => {
-                    assert_eq!(parsed, &["Hello", "世界"]);
+            match coro.resume() {
+                CoroState::Complete(parsed) => {
+                    assert_eq!(parsed.unwrap(), &["Hello", "世界"]);
                     return;
                 }
+                CoroState::Pending(c, n) => c.send({
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf).await.unwrap();
+                    buf
+                }),
             }
         };
     }

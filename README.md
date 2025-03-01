@@ -11,25 +11,82 @@ everything with a single struct: `PinnedStateMachine`. It also enforces that rep
 calling `step` again via a lifecycle typestate.
 
 ```rust
-fn read_9p_sync_from_bytes<T, R>(r: &mut R) -> io::Result<T>
-where
-    T: Read9p,
-    R: Read,
-{
-    let mut state_machine = NinepParser::initialize();
+use crimes::{Coro, CoroState, Handle};
+use std::io::{self, Cursor, ErrorKind};
+
+// ["Hello", "世界"] in 9p wire format.
+const HELLO_WORLD: [u8; 17] = [
+    0x02, 0x00, 0x05, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x06, 0x00, 0xe4, 0xb8, 0x96, 0xe7, 0x95,
+    0x8c,
+];
+
+#[tokio::main]
+async fn main() {
+    parse_sync();
+    parse_async().await;
+}
+
+fn parse_sync() {
+    use std::io::Read;
+
+    let mut r = Cursor::new(HELLO_WORLD.to_vec());
+    let parsed = Coro::from(read_9p_string_vec)
+        .run_sync(|n| {
+            let mut buf = vec![0; n];
+            r.read_exact(&mut buf).unwrap();
+            buf
+        })
+        .expect("parsing to be successful");
+
+    assert_eq!(parsed, &["Hello", "世界"]);
+}
+
+async fn parse_async() {
+    use tokio::io::AsyncReadExt;
+
+    let mut coro = Coro::from(read_9p_string_vec);
+    let mut r = Cursor::new(HELLO_WORLD.to_vec());
+
     loop {
-        state_machine = {
-            match state_machine.step() {
-                Step::Complete(res) => return res,
-                Step::Pending(sm, n) => {
-                    println!("{n} bytes requested");
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf)?;
-                    sm.send(buf)
+        coro = {
+            match coro.resume() {
+                CoroState::Complete(parsed) => {
+                    assert_eq!(parsed.unwrap(), &["Hello", "世界"]);
+                    return;
                 }
+                CoroState::Pending(c, n) => c.send({
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf).await.unwrap();
+                    buf
+                }),
             }
         };
     }
+}
+
+async fn read_9p_u16(handle: Handle<usize, Vec<u8>>) -> io::Result<u16> {
+    let n = size_of::<u16>();
+    let buf = handle.yield_value(n).await;
+    let data = buf[0..n].try_into().unwrap();
+
+    Ok(u16::from_le_bytes(data))
+}
+
+async fn read_9p_string(handle: Handle<usize, Vec<u8>>) -> io::Result<String> {
+    let len = handle.yield_from(read_9p_u16).await? as usize;
+    let buf = handle.yield_value(len).await;
+
+    String::from_utf8(buf).map_err(|e| io::Error::new(ErrorKind::InvalidData, e.to_string()))
+}
+
+async fn read_9p_string_vec(handle: Handle<usize, Vec<u8>>) -> io::Result<Vec<String>> {
+    let len = handle.yield_from(read_9p_u16).await? as usize;
+    let mut buf = Vec::with_capacity(len);
+    for _ in 0..len {
+        buf.push(handle.yield_from(read_9p_string).await?);
+    }
+
+    Ok(buf)
 }
 ```
 

@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format
-use crimes::{Handle, StateMachine, Step};
+use crimes::{AsCoro, CoroState, Handle};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
@@ -41,9 +41,9 @@ where
     let mut state_machine = NinepParser::initialize();
     loop {
         state_machine = {
-            match state_machine.step() {
-                Step::Complete(res) => return res,
-                Step::Pending(sm, n) => {
+            match state_machine.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(sm, n) => {
                     println!("{n} bytes requested");
                     let mut buf = vec![0; n];
                     r.read_exact(&mut buf)?;
@@ -63,9 +63,9 @@ where
     let mut state_machine = NinepParser::initialize();
     loop {
         state_machine = {
-            match state_machine.step() {
-                Step::Complete(res) => return res,
-                Step::Pending(sm, n) => {
+            match state_machine.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(sm, n) => {
                     println!("{n} bytes requested");
                     let mut buf = vec![0; n];
                     r.read_exact(&mut buf).await?;
@@ -88,7 +88,7 @@ struct NinepParser<T>(PhantomData<T>)
 where
     T: Read9p;
 
-impl<T> StateMachine for NinepParser<T>
+impl<T> AsCoro for NinepParser<T>
 where
     T: Read9p,
 {
@@ -96,7 +96,7 @@ where
     type Rcv = Vec<u8>;
     type Out = io::Result<T>;
 
-    async fn run(handle: Handle<Self::Snd, Self::Rcv>) -> Self::Out {
+    async fn as_coro(handle: Handle<Self::Snd, Self::Rcv>) -> Self::Out {
         <T as Read9p>::read_9p(handle).await
     }
 }
