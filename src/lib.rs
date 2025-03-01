@@ -126,7 +126,6 @@ where
     F: Future<Output = O> + Send,
 {
     /// Run the [StateMachine] to its next yield point.
-    #[allow(clippy::type_complexity)]
     pub fn step(mut self) -> Step<S, O, R, F> {
         // SAFETY: we never use this waker for its intended purpose
         let waker = unsafe {
@@ -234,6 +233,34 @@ where
             _r: PhantomData,
         }
         .await
+    }
+
+    /// Defer yielding to another [Coro] until it completes
+    pub async fn yield_from<T, C, F>(&self, coro: C) -> T
+    where
+        C: Into<ReadyCoro<R, T, F, S>>,
+        F: Future<Output = T> + Send,
+    {
+        let fut = coro.into().fut;
+        AwaitableCoro { fut }.await
+    }
+}
+
+struct AwaitableCoro<O, F>
+where
+    F: Future<Output = O>,
+{
+    fut: Pin<Box<F>>,
+}
+
+impl<O, F> Future for AwaitableCoro<O, F>
+where
+    F: Future<Output = O>,
+{
+    type Output = O;
+
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.fut.as_mut().poll(ctx)
     }
 }
 
