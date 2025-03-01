@@ -12,7 +12,6 @@
 )]
 
 use std::{
-    cell::UnsafeCell,
     fmt,
     future::Future,
     marker::PhantomData,
@@ -46,17 +45,26 @@ pub trait StateMachine: Sized {
 
     /// Initialize a new [Coro].
     fn initialize() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
-        let (state, waker) = init_state();
-
         Coro {
             _lifecyle: Ready,
-            state,
-            waker,
+            state: State::default(),
             fut: Box::pin(Self::run(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
             })),
         }
+    }
+}
+
+#[derive(Debug)]
+struct State<S, R> {
+    s: Option<S>,
+    r: Option<R>,
+}
+
+impl<S, R> Default for State<S, R> {
+    fn default() -> Self {
+        Self { s: None, r: None }
     }
 }
 
@@ -88,45 +96,8 @@ where
     L: Lifecycle,
 {
     _lifecyle: L,
-    state: StatePtr<S, R>,
-    waker: Waker,
+    state: State<S, R>,
     fut: Pin<Box<F>>,
-}
-
-struct StatePtr<S, R>(*const State<S, R>)
-where
-    R: Unpin + 'static,
-    S: Unpin + 'static;
-
-/// SAFETY: a StatePtr is only ever wrapping a pointer on the heap that is shared between a
-/// Coro and the StateFn it holds
-unsafe impl<S, R> Send for StatePtr<S, R>
-where
-    R: Send + Unpin + 'static,
-    S: Send + Unpin + 'static,
-{
-}
-
-/// SAFETY: a StatePtr is only ever wrapping a pointer on the heap that is shared between a
-/// Coro and the StateFn it holds
-unsafe impl<S, R> Sync for StatePtr<S, R>
-where
-    R: Sync + Unpin + 'static,
-    S: Sync + Unpin + 'static,
-{
-}
-
-impl<S, R> Drop for StatePtr<S, R>
-where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
-{
-    fn drop(&mut self) {
-        // SAFETY: the only other copies of this pointer are in the StateFn that is being
-        // dropped at the same time and it is not currently running if we are dropping the
-        // Coro containing it.
-        unsafe { std::ptr::drop_in_place(self.0 as *mut State<S, R>) };
-    }
 }
 
 impl<R, O, F, L, S> fmt::Debug for Coro<R, O, F, L, S>
@@ -143,6 +114,11 @@ where
     }
 }
 
+const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(clone_callback, |_| {}, |_| {}, |_| {});
+unsafe fn clone_callback(ptr: *const ()) -> RawWaker {
+    RawWaker::new(ptr, &WAKER_VTABLE)
+}
+
 impl<R, O, F, S> Coro<R, O, F, Ready, S>
 where
     R: Unpin + 'static,
@@ -152,23 +128,26 @@ where
     /// Run the [StateMachine] to its next yield point.
     #[allow(clippy::type_complexity)]
     pub fn step(mut self) -> Step<S, O, R, F> {
-        let mut ctx = Context::from_waker(&self.waker);
+        // SAFETY: we never use this waker for its intended purpose
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(
+                &self.state as *const State<S, R> as *const (),
+                &WAKER_VTABLE,
+            ))
+        };
+        let mut ctx = Context::from_waker(&waker);
         match self.fut.as_mut().poll(&mut ctx) {
             Poll::Ready(val) => Step::Complete(val),
             Poll::Pending => {
-                // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-                // or inside of Coro::step which never execute at the same time.
-                let s = unsafe {
-                    (*(*self.state.0).inner.get())
-                        .s
-                        .take()
-                        .expect("a StateMachine awaited a future other than Handle::yield_value")
-                };
+                let s = self
+                    .state
+                    .s
+                    .take()
+                    .expect("a StateMachine awaited a future other than Handle::yield_value");
 
                 let sm = Coro {
                     _lifecyle: Pending,
                     state: self.state,
-                    waker: self.waker,
                     fut: self.fut,
                 };
 
@@ -185,15 +164,12 @@ where
     F: Future<Output = O>,
 {
     /// Send a response to the child [StateMachine] following a call to [Handle::yield_value].
-    pub fn send(self, r: R) -> ReadyCoro<R, O, F, S> {
-        // SAFETY: We only ever access the shared state held within our UnsafeCell from a
-        // or inside of Coro::step which never execute at the same time.
-        unsafe { (*(*self.state.0).inner.get()).r = Some(r) };
+    pub fn send(mut self, r: R) -> ReadyCoro<R, O, F, S> {
+        self.state.r = Some(r);
 
         Coro {
             _lifecyle: Ready,
             state: self.state,
-            waker: self.waker,
             fut: self.fut,
         }
     }
@@ -211,48 +187,6 @@ where
     Pending(PendingCoro<R, T, F, S>, S),
     /// The [StateMachine] is now complete
     Complete(T),
-}
-
-#[derive(Debug)]
-struct State<Snd, Rcv> {
-    inner: UnsafeCell<StateInner<Snd, Rcv>>,
-}
-
-impl<S, R> Default for State<S, R> {
-    fn default() -> Self {
-        Self {
-            inner: Default::default(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct StateInner<S, R> {
-    s: Option<S>,
-    r: Option<R>,
-}
-
-impl<S, R> Default for StateInner<S, R> {
-    fn default() -> Self {
-        Self { s: None, r: None }
-    }
-}
-
-const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(clone_callback, |_| {}, |_| {}, |_| {});
-unsafe fn clone_callback(ptr: *const ()) -> RawWaker {
-    RawWaker::new(ptr, &WAKER_VTABLE)
-}
-
-fn init_state<S, R>() -> (StatePtr<S, R>, Waker)
-where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
-{
-    let state = Box::into_raw(Box::new(State::default()));
-    // SAFETY: we never use this waker for its intended purpose
-    let waker = unsafe { Waker::from_raw(RawWaker::new(state as *mut (), &WAKER_VTABLE)) };
-
-    (StatePtr(state), waker)
 }
 
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
@@ -326,15 +260,13 @@ where
             // and we only ever access the shared state held within our UnsafeCell from a
             // or inside of Coro::step which never execute at the same time.
             let data = unsafe {
-                (*(ctx.waker().data() as *mut () as *mut State<S, R>)
+                (ctx.waker().data() as *mut () as *mut State<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
-                    .inner
-                    .get())
-                .r
-                .take()
-                // should not be possible
-                .expect("shared state was not set before calling step")
+                    .r
+                    .take()
+                    // should not be possible
+                    .expect("shared state was not set before calling step")
             };
 
             Poll::Ready(data)
@@ -344,12 +276,10 @@ where
             // and we only ever access the shared state held within our UnsafeCell from a
             // or inside of Coro::step which never execute at the same time.
             unsafe {
-                (*(ctx.waker().data() as *mut () as *mut State<S, R>)
+                (ctx.waker().data() as *mut () as *mut State<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
-                    .inner
-                    .get())
-                .s = Some(self.s.take().unwrap_unchecked());
+                    .s = Some(self.s.take().unwrap_unchecked());
             };
 
             Poll::Pending
@@ -365,12 +295,9 @@ where
     Fut: Future<Output = O>,
 {
     fn from(f: F) -> Self {
-        let (state, waker) = init_state();
-
         Coro {
             _lifecyle: Ready,
-            state,
-            waker,
+            state: State::default(),
             fut: Box::pin((f)(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
@@ -395,12 +322,9 @@ pub trait IntoStateFn: Sized {
     fn initialize(
         self,
     ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
-        let (state, waker) = init_state();
-
         Coro {
             _lifecyle: Ready,
-            state,
-            waker,
+            state: State::default(),
             fut: Box::pin((self.into_state_fn())(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
