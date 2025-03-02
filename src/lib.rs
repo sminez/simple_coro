@@ -1,4 +1,4 @@
-//! An exploration of (ab)using async/await syntax to simplify writing state machines.
+//! An exploration of (ab)using async/await syntax to simplify writing coroutines.
 #![warn(
     clippy::complexity,
     clippy::correctness,
@@ -23,7 +23,7 @@ use std::{
 /// See [AsCoro] and [IntoCoro] for details.
 ///
 /// # Panics
-/// Any calls to async methods or functions other than those provided by [Handle] will panic.
+/// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
 pub type CoroFn<S, R, F> = fn(Handle<S, R>) -> F;
 
 /// A type that can construct a [Coro]
@@ -32,14 +32,14 @@ pub trait AsCoro: Sized {
     type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
     type Rcv: Unpin + 'static;
-    /// The output of running this state machine to completion
+    /// The output of running the coroutine to completion
     type Out;
 
-    /// Return a future that can be executed by calling [AsCoro::initialize] to convert this
-    /// type into a [Coro] that can be run to completeion.
+    /// Return a future that can be executed by calling [AsCoro::as_coro] to convert this type into
+    /// a [Coro] that can be run to completeion.
     ///
     /// # Panics
-    /// Any calls to async methods or functions other than those provided by [Handle] will panic.
+    /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
     fn as_coro_fn(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
     /// Initialize a new [Coro] using this type as a constructor.
@@ -61,10 +61,14 @@ pub trait IntoCoro: Sized {
     type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
     type Rcv: Unpin + 'static;
-    /// The output of running this state machine to completion
+    /// The output of running the coroutine to completion
     type Out;
 
-    /// Provide a [CoroFn] to run as a [Coro].
+    /// Provide a future that can be executed by calling [IntoCoro::into_coro] to convert this type
+    /// into a [Coro] that can be run to completeion.
+    ///
+    /// # Panics
+    /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
     fn into_coro_fn(self) -> CoroFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
 
     /// Initialize a new [Coro] from a value.
@@ -102,7 +106,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SharedState<S, R> {
     s: Option<S>,
     r: Option<R>,
@@ -122,15 +126,15 @@ pub trait Lifecycle: fmt::Debug {}
 pub struct Ready;
 impl Lifecycle for Ready {}
 
-/// Awaiting a call to [Coro::send] to reply to the inner [AsCoro].
+/// Awaiting a call to [Coro::send].
 #[derive(Debug)]
 pub struct Pending;
 impl Lifecycle for Pending {}
 
-/// A [Coro] that is ready to be resumed
+/// A [Coro] that is ready to be resumed.
 pub type ReadyCoro<R, O, F, S> = Coro<R, O, F, Ready, S>;
 
-/// A [Coro] that is pending a response
+/// A [Coro] that is pending a response.
 pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 
 /// A handle to a running [AsCoro] that can make progress by calling [resume][Coro::resume].
@@ -268,6 +272,7 @@ where
 
 /// The intermediate state of a [AsCoro] while it is executing
 #[derive(Debug)]
+#[must_use]
 pub enum CoroState<S, T, R, F>
 where
     S: Unpin + 'static,
@@ -280,10 +285,46 @@ where
     Complete(T),
 }
 
+impl<S, T, R, F> CoroState<S, T, R, F>
+where
+    S: Unpin + 'static,
+    R: Unpin + 'static,
+    F: Future<Output = T>,
+{
+    /// Assume that this value is [Pending][CoroState::Pending] and send a response to the
+    /// underlying [Coro] using the provided mapping function to unwrap it into a [ReadyCoro].
+    ///
+    /// # Panics
+    /// This will panic if the value was [Complete][CoroState::Complete].
+    pub fn unwrap_pending(self, f: impl Fn(S) -> R) -> ReadyCoro<R, T, F, S> {
+        match self {
+            Self::Pending(coro, s) => coro.send((f)(s)),
+            Self::Complete(_) => {
+                panic!("called `CoroState::unwrap_pending` on a `Complete` value")
+            }
+        }
+    }
+
+    /// Assume that this value is [Complete][CoroState::Complete] and unwrap it to return the inner
+    /// value.
+    ///
+    /// # Panics
+    /// This will panic if the value was [Pending][CoroState::Pending].
+    pub fn unwrap(self) -> T {
+        match self {
+            Self::Pending(_, _) => {
+                panic!("called `CoroState::unwrap` on a `Pending` value")
+            }
+            Self::Complete(t) => t,
+        }
+    }
+}
+
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
 ///
-/// The only way to obtain a [Handle] is via the [AsCoro::initialize] method which will pass one to
-/// [AsCoro::as_coro] in order to construct the state machine future.
+/// The only way to obtain a [Handle] is via the [AsCoro::as_coro_fn] or [IntoCoro::into_coro_fn]
+/// methods which will pass one to the [AsCoro::as_coro] and [IntoCoro::into_coro] methods
+/// respectively in order to construct a [Coro].
 #[derive(Debug)]
 pub struct Handle<S, R = ()>
 where
@@ -400,26 +441,96 @@ mod tests {
     use std::io::{self, Cursor, ErrorKind};
     use std::{sync::mpsc::channel, thread::spawn};
 
+    #[tokio::test]
+    #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
+    async fn awaiting_a_future_that_needs_a_waker_panics() {
+        let coro = Coro::from(async |_: Handle<()>| {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            "boom!"
+        });
+
+        let _ = coro.resume();
+    }
+
+    // This is handled on the tokio side by checking if the tokio runtime is present but tested
+    // here to document the difference in the error message received. In both cases (this and the
+    // above) awaiting a future that needs a Waker results in a panic.
+    #[test]
+    #[should_panic = "there is no reactor running, must be called from the context of a Tokio 1.x runtime"]
+    fn awaiting_a_tokio_future_panics_outside_of_tokio() {
+        let coro = Coro::from(async |_: Handle<()>| {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            "boom!"
+        });
+
+        let _ = coro.resume();
+    }
+
     #[test]
     fn yield_recv_return_works() {
         let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
             assert!(handle.yield_value(42).await);
-
             "hello, world!"
         });
 
-        coro = match coro.resume() {
-            CoroState::Complete(s) => panic!("first resume should yield, got {s}"),
-            CoroState::Pending(c, n) => {
-                assert_eq!(n, 42);
-                c.send(true)
-            }
-        };
+        coro = coro.resume().unwrap_pending(|n| {
+            assert_eq!(n, 42);
+            true
+        });
 
-        match coro.resume() {
-            CoroState::Complete(s) => assert_eq!(s, "hello, world!"),
-            CoroState::Pending(_, n) => panic!("second resume should complete, got {n}"),
-        };
+        let s = coro.resume().unwrap();
+        assert_eq!(s, "hello, world!");
+    }
+
+    // This is pretty contrived but worthwhile validating that chaining the unwrap and
+    // unwrap_pending methods works fine
+    #[test]
+    fn coro_state_chaining_works() {
+        let s = Coro::from(async |handle: Handle<usize, bool>| {
+            assert!(handle.yield_value(42).await);
+            "hello, world!"
+        })
+        .resume()
+        .unwrap_pending(|n| {
+            assert_eq!(n, 42);
+            true
+        })
+        .resume()
+        .unwrap();
+
+        assert_eq!(s, "hello, world!");
+    }
+
+    #[test]
+    #[should_panic = "called `CoroState::unwrap` on a `Pending` value"]
+    fn unwrap_on_pending_panics() {
+        let coro = Coro::from(async |handle: Handle<usize, bool>| {
+            assert!(handle.yield_value(42).await);
+            "hello, world!"
+        });
+
+        coro.resume().unwrap();
+    }
+
+    #[test]
+    #[should_panic = "called `CoroState::unwrap_pending` on a `Complete` value"]
+    fn unwrap_pending_on_complete_panics() {
+        let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
+            assert!(handle.yield_value(42).await);
+            "hello, world!"
+        });
+
+        coro = coro.resume().unwrap_pending(|n| {
+            assert_eq!(n, 42);
+            true
+        });
+
+        coro.resume().unwrap_pending(|n| {
+            assert_eq!(n, 42);
+            true
+        });
     }
 
     // Trying to write double_nums as a closure that returns a Coro results in lifetime errors

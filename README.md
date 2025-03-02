@@ -2,6 +2,17 @@
 
 Use crimes to write ergonomic state machines (coroutines) using futures.
 
+## Why is this criminal?
+
+Originally the "crimes" aspect of this was due to it being a quickly hacked
+together proof of concept that had a safe(ish) API. As I've continued to work
+on things it's beginning to look more and more reasonable but I'd still argue
+that this is probably _not_ what you want, particularly if you are happy using
+the nightly compiler support for [coroutines](https://doc.rust-lang.org/std/ops/trait.Coroutine.html).
+
+If you want to see how things are used, take a look at the test suite in `lib.rs`
+or the files in the `examples` directory.
+
 
 ## A note on API changes
 
