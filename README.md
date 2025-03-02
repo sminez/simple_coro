@@ -1,14 +1,15 @@
 # Crimes
 
-Use crimes to write ergonomic state machines using futures.
+Use crimes to write ergonomic state machines (coroutines) using futures.
 
 
 ## A note on API changes
 
-After writing my [Socrates is a state machine][0] blog post I couldn't resist trying to simplify the API,
-so rather than what is presented there (a paired runner and state machine) the updated API now handles
-everything with a single struct: `PinnedStateMachine`. It also enforces that replies are sent before
-calling `step` again via a lifecycle typestate.
+After writing my [Socrates is a state machine][0] blog post I couldn't resist
+trying to simplify the API, so rather than what is presented there (a paired
+runner and state machine) the updated API now handles everything with a single
+struct: `Coro`. It also enforces that replies are sent before calling `resume`
+again via a lifecycle typestate.
 
 ```rust
 use crimes::{Coro, CoroState, Handle};
@@ -48,18 +49,16 @@ async fn parse_async() {
     let mut r = Cursor::new(HELLO_WORLD.to_vec());
 
     loop {
-        coro = {
-            match coro.resume() {
-                CoroState::Complete(parsed) => {
-                    assert_eq!(parsed.unwrap(), &["Hello", "世界"]);
-                    return;
-                }
-                CoroState::Pending(c, n) => c.send({
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf).await.unwrap();
-                    buf
-                }),
+        coro = match coro.resume() {
+            CoroState::Complete(parsed) => {
+                assert_eq!(parsed.unwrap(), &["Hello", "世界"]);
+                return;
             }
+            CoroState::Pending(c, n) => c.send({
+                let mut buf = vec![0; n];
+                r.read_exact(&mut buf).await.unwrap();
+                buf
+            }),
         };
     }
 }

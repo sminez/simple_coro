@@ -40,14 +40,14 @@ pub trait AsCoro: Sized {
     ///
     /// # Panics
     /// Any calls to async methods or functions other than those provided by [Handle] will panic.
-    fn as_coro(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
+    fn as_coro_fn(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
     /// Initialize a new [Coro] using this type as a constructor.
-    fn initialize() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+    fn as_coro() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
         Coro {
             _lifecyle: Ready,
             state: SharedState::default(),
-            fut: Box::pin(Self::as_coro(Handle {
+            fut: Box::pin(Self::as_coro_fn(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
             })),
@@ -68,7 +68,7 @@ pub trait IntoCoro: Sized {
     fn into_coro_fn(self) -> CoroFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
 
     /// Initialize a new [Coro] from a value.
-    fn initialize(
+    fn into_coro(
         self,
     ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
         Coro {
@@ -181,11 +181,9 @@ where
     {
         let mut coro = self;
         loop {
-            coro = {
-                match coro.resume() {
-                    CoroState::Complete(res) => return res,
-                    CoroState::Pending(c, s) => c.send((step_fn)(s)),
-                }
+            coro = match coro.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(c, s) => c.send((step_fn)(s)),
             };
         }
     }
@@ -339,12 +337,11 @@ where
     }
 
     /// Defer yielding to another [Coro] type until it completes
-    pub async fn yield_from_type<T, C, F>(&self) -> T
+    pub async fn yield_from_type<C, T>(&self) -> T
     where
         C: AsCoro<Snd = S, Rcv = R, Out = T>,
-        F: Future<Output = T>,
     {
-        C::as_coro(*self).await
+        C::as_coro_fn(*self).await
     }
 }
 
@@ -367,25 +364,24 @@ where
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<R> {
         if self.polled {
-            // SAFETY: we can only poll this future using a waker wrapping State<S, R>
-            // and we only ever access the shared state held within our UnsafeCell from a
-            // or inside of Coro::resume which never execute at the same time.
+            // SAFETY: we can only poll this future using a waker wrapping State<S, R> and we only
+            // ever access the shared state here or inside of Coro::resume which never execute at
+            // the same time.
             let data = unsafe {
                 (ctx.waker().data() as *mut () as *mut SharedState<S, R>)
                     .as_mut()
                     .unwrap_unchecked()
                     .r
                     .take()
-                    // should not be possible
-                    .expect("shared state was not set before calling step")
+                    .unwrap_unchecked()
             };
 
             Poll::Ready(data)
         } else {
             self.polled = true;
-            // SAFETY: we can only poll this future using a waker wrapping State<S, R>
-            // and we only ever access the shared state held within our UnsafeCell from a
-            // or inside of Coro::resume which never execute at the same time.
+            // SAFETY: we can only poll this future using a waker wrapping State<S, R> and we only
+            // ever access the shared state here or inside of Coro::resume which never execute at
+            // the same time.
             unsafe {
                 (ctx.waker().data() as *mut () as *mut SharedState<S, R>)
                     .as_mut()
@@ -440,33 +436,6 @@ mod tests {
             "done"
         })
     }
-
-    // let double_nums = |nums: &[usize]| {
-    //     Coro::from(move |handle: Handle<usize, usize>| async move {
-    //         for &n in nums.iter() {
-    //             let doubled = handle.yield_value(n).await;
-    //             assert_eq!(doubled, n * 2);
-    //         }
-
-    //         "done"
-    //     })
-    // };
-
-    // error: lifetime may not live long enough
-    //    --> src/lib.rs:623:13
-    //     |
-    // 622 |           let double_nums = |nums: &[usize]| {
-    //     |                                -       - return type of closure `Coro<usize, &str, {async block@src/lib.rs:623:60: 623:70}, Ready, usize>` contains a lifetime `'2`
-    //     |                                |
-    //     |                                let's call the lifetime of this reference `'1`
-    // 623 | /             Coro::from(move |handle: Handle<usize, usize>| async move {
-    // 624 | |                 for &n in nums.iter() {
-    // 625 | |                     let doubled = handle.yield_value(n).await;
-    // 626 | |                     assert_eq!(doubled, n * 2);
-    // ...   |
-    // 629 | |                 "done"
-    // 630 | |             })
-    //     | |______________^ returning this value requires that `'1` must outlive `'2`
 
     #[test]
     fn closures_capturing_references_work() {
@@ -567,6 +536,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_yield_from_works() {
+        use std::io::Read;
+
+        let mut coro = Coro::from(read_9p_string_vec);
+        let mut r = Cursor::new(HELLO_WORLD.to_vec());
+
+        loop {
+            coro = match coro.resume() {
+                CoroState::Complete(parsed) => {
+                    assert_eq!(parsed.unwrap(), &["Hello", "世界"]);
+                    return;
+                }
+                CoroState::Pending(c, n) => c.send({
+                    let mut buf = vec![0; n];
+                    r.read_exact(&mut buf).unwrap();
+                    buf
+                }),
+            };
+        }
+    }
+
+    #[tokio::test]
     async fn nested_yield_from_works_with_async() {
         use tokio::io::AsyncReadExt;
 
@@ -604,21 +595,40 @@ mod tests {
         assert_eq!(parsed, &["Hello", "世界"]);
     }
 
-    /// This is the form needed for moving a value into a CoroFn it seems
-    fn count(k: usize) -> Generator<usize, impl Future<Output = ()>> {
-        Generator::from(move |handle: Handle<usize>| async move {
-            for n in 0..k {
-                handle.yield_value(n).await;
+    // Using const generics to implement a counter generator
+    struct Counter<const N: usize>;
+
+    impl<const N: usize> AsCoro for Counter<N> {
+        type Snd = usize;
+        type Rcv = ();
+        type Out = ();
+
+        async fn as_coro_fn(handle: Handle<usize>) {
+            for n in 0..N {
+                handle.yield_value(n).await
             }
-        })
+        }
     }
 
     #[test]
     fn generator_iter_works() {
-        let nums: Vec<usize> = count(6).collect();
+        let nums: Vec<usize> = Counter::<6>::as_coro().collect();
         assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
     }
 
+    #[test]
+    fn yield_from_type_works() {
+        let coro = Coro::from(async |handle: Handle<usize>| {
+            handle.yield_from_type::<Counter<6>, _>().await
+        });
+        let total: usize = coro.sum();
+
+        assert_eq!(total, 1 + 2 + 3 + 4 + 5);
+    }
+
+    // This _doesn't_ work when you are closing over a reference (like in the double_nums case
+    // above) due to the Coro capturing a lifetime. Need to work out what is different when you
+    // define it as a free function as that works...
     #[test]
     fn capturing_nested_closure_works() {
         let g = |k: usize| {

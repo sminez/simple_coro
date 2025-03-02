@@ -23,7 +23,7 @@ async fn main() -> io::Result<()> {
 
 // This is what our blocking I/O read loop ends up looking like
 fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
-    let mut state_machine = NineP::initialize();
+    let mut state_machine = NineP::as_coro();
     loop {
         state_machine = match state_machine.resume() {
             CoroState::Complete(res) => return res,
@@ -39,7 +39,7 @@ fn read_9p_sync_from_bytes<T: Read9p, R: io::Read>(r: &mut R) -> io::Result<T> {
 
 // This is what our non-blocking I/O read loop ends up looking like
 async fn read_9p_async_from_bytes<T: Read9p, R: AsyncRead + Unpin>(r: &mut R) -> io::Result<T> {
-    let mut state_machine = NineP::initialize();
+    let mut state_machine = NineP::as_coro();
     loop {
         state_machine = match state_machine.resume() {
             CoroState::Complete(res) => return res,
@@ -67,7 +67,7 @@ impl<T: Read9p> AsCoro for NineP<T> {
     type Rcv = Vec<u8>;
     type Out = io::Result<T>;
 
-    async fn as_coro(handle: Handle<usize, Vec<u8>>) -> io::Result<T> {
+    async fn as_coro_fn(handle: Handle<usize, Vec<u8>>) -> io::Result<T> {
         T::read_9p(handle).await
     }
 }
@@ -83,7 +83,7 @@ impl Read9p for u16 {
 
 impl Read9p for String {
     async fn read_9p(handle: Handle<usize, Vec<u8>>) -> io::Result<String> {
-        let len = NineP::<u16>::as_coro(handle).await? as usize;
+        let len = NineP::<u16>::as_coro_fn(handle).await? as usize;
         let buf = handle.yield_value(len).await;
         String::from_utf8(buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))

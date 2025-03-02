@@ -38,7 +38,7 @@ where
     T: Read9p,
     R: Read,
 {
-    let mut state_machine = NinepParser::initialize();
+    let mut state_machine = NinepParser::as_coro();
     loop {
         state_machine = match state_machine.resume() {
             CoroState::Complete(res) => return res,
@@ -58,7 +58,7 @@ where
     T: Read9p,
     R: AsyncRead + Unpin,
 {
-    let mut state_machine = NinepParser::initialize();
+    let mut state_machine = NinepParser::as_coro();
     loop {
         state_machine = match state_machine.resume() {
             CoroState::Complete(res) => return res,
@@ -92,7 +92,7 @@ where
     type Rcv = Vec<u8>;
     type Out = io::Result<T>;
 
-    async fn as_coro(handle: Handle<Self::Snd, Self::Rcv>) -> Self::Out {
+    async fn as_coro_fn(handle: Handle<Self::Snd, Self::Rcv>) -> Self::Out {
         <T as Read9p>::read_9p(handle).await
     }
 }
