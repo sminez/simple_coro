@@ -45,7 +45,7 @@ pub trait AsCoro: Sized {
     /// Initialize a new [Coro] using this type as a constructor.
     fn as_coro() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
         Coro {
-            _lifecyle: Ready,
+            _lifecycle: Ready,
             state: SharedState::default(),
             fut: Box::pin(Self::as_coro_fn(Handle {
                 _snd: PhantomData,
@@ -76,7 +76,7 @@ pub trait IntoCoro: Sized {
         self,
     ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
         Coro {
-            _lifecyle: Ready,
+            _lifecycle: Ready,
             state: SharedState::default(),
             fut: Box::pin((self.into_coro_fn())(Handle {
                 _snd: PhantomData,
@@ -96,7 +96,7 @@ where
 {
     fn from(f: F) -> Self {
         Coro {
-            _lifecyle: Ready,
+            _lifecycle: Ready,
             state: SharedState::default(),
             fut: Box::pin((f)(Handle {
                 _snd: PhantomData,
@@ -105,6 +105,14 @@ where
         }
     }
 }
+
+const DENY_FUT: &str = "a Coro is not permitted to await a future that uses an arbitrary Waker";
+const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |_| panic!("{DENY_FUT}"),
+    |_| panic!("{DENY_FUT}"),
+    |_| panic!("{DENY_FUT}"),
+    |_| {},
+);
 
 #[derive(Debug, Clone)]
 struct SharedState<S, R> {
@@ -118,7 +126,7 @@ impl<S, R> Default for SharedState<S, R> {
     }
 }
 
-/// The lifecycle state of a running [AsCoro]: either [Pending] or [Ready].
+/// The lifecycle state of a running [Coro]: either [Pending] or [Ready].
 pub trait Lifecycle: fmt::Debug {}
 
 /// Ready for the next call to [Coro::resume]
@@ -137,7 +145,7 @@ pub type ReadyCoro<R, O, F, S> = Coro<R, O, F, Ready, S>;
 /// A [Coro] that is pending a response.
 pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 
-/// A handle to a running [AsCoro] that can make progress by calling [resume][Coro::resume].
+/// A running coroutine that can make progress by calling [resume][Coro::resume].
 pub struct Coro<R, O, F, L, S>
 where
     R: Unpin + 'static,
@@ -145,7 +153,7 @@ where
     F: Future<Output = O>,
     L: Lifecycle,
 {
-    _lifecyle: L,
+    _lifecycle: L,
     state: SharedState<S, R>,
     fut: Pin<Box<F>>,
 }
@@ -159,18 +167,10 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Coro")
-            .field("lifecycle", &self._lifecyle)
+            .field("lifecycle", &self._lifecycle)
             .finish()
     }
 }
-
-const DENY_FUT: &str = "a Coro is not permitted to await a future that uses an arbitrary Waker";
-const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-    |_| panic!("{DENY_FUT}"),
-    |_| panic!("{DENY_FUT}"),
-    |_| panic!("{DENY_FUT}"),
-    |_| {},
-);
 
 impl<R, O, Fut, S> Coro<R, O, Fut, Ready, S>
 where
@@ -207,7 +207,7 @@ where
             Poll::Pending => {
                 let s = self.state.s.take().unwrap_or_else(|| panic!("{DENY_FUT}"));
                 let sm = Coro {
-                    _lifecyle: Pending,
+                    _lifecycle: Pending,
                     state: self.state,
                     fut: self.fut,
                 };
@@ -224,12 +224,12 @@ where
     S: Unpin + 'static,
     F: Future<Output = O>,
 {
-    /// Send a response to the child [AsCoro] following a call to [Handle::yield_value].
+    /// Send a response to this [Coro] following a call to [Handle::yield_value].
     pub fn send(mut self, r: R) -> ReadyCoro<R, O, F, S> {
         self.state.r = Some(r);
 
         Coro {
-            _lifecyle: Ready,
+            _lifecycle: Ready,
             state: self.state,
             fut: self.fut,
         }
@@ -270,7 +270,7 @@ where
     }
 }
 
-/// The intermediate state of a [AsCoro] while it is executing
+/// The intermediate state of a [Coro] while it is executing
 #[derive(Debug)]
 #[must_use]
 pub enum CoroState<S, T, R, F>
@@ -279,9 +279,9 @@ where
     R: Unpin + 'static,
     F: Future<Output = T>,
 {
-    /// The [AsCoro] yielded via [Handle::yield_value]
+    /// The [Coro] yielded via [Handle::yield_value]
     Pending(PendingCoro<R, T, F, S>, S),
-    /// The [AsCoro] is now complete
+    /// The [Coro] is now complete
     Complete(T),
 }
 
@@ -322,9 +322,8 @@ where
 
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
 ///
-/// The only way to obtain a [Handle] is via the [AsCoro::as_coro_fn] or [IntoCoro::into_coro_fn]
-/// methods which will pass one to the [AsCoro::as_coro] and [IntoCoro::into_coro] methods
-/// respectively in order to construct a [Coro].
+/// The only way to obtain a [Handle] is by constructing a [Coro] (via the [AsCoro::as_coro_fn] or
+/// [IntoCoro::into_coro_fn] methods or calling [Coro::from] on an appropriate function).
 #[derive(Debug)]
 pub struct Handle<S, R = ()>
 where
@@ -441,16 +440,18 @@ mod tests {
     use std::io::{self, Cursor, ErrorKind};
     use std::{sync::mpsc::channel, thread::spawn};
 
-    #[tokio::test]
-    #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
-    async fn awaiting_a_future_that_needs_a_waker_panics() {
-        let coro = Coro::from(async |_: Handle<()>| {
+    fn tokio_boom() -> ReadyCoro<(), &'static str, impl Future<Output = &'static str>, ()> {
+        Coro::from(async |_: Handle<()>| {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
             "boom!"
-        });
+        })
+    }
 
-        let _ = coro.resume();
+    #[tokio::test]
+    #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
+    async fn awaiting_a_future_that_needs_a_waker_panics() {
+        let _ = tokio_boom().resume();
     }
 
     // This is handled on the tokio side by checking if the tokio runtime is present but tested
@@ -459,22 +460,21 @@ mod tests {
     #[test]
     #[should_panic = "there is no reactor running, must be called from the context of a Tokio 1.x runtime"]
     fn awaiting_a_tokio_future_panics_outside_of_tokio() {
-        let coro = Coro::from(async |_: Handle<()>| {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let _ = tokio_boom().resume();
+    }
 
-            "boom!"
-        });
+    fn yield_recv_return()
+    -> ReadyCoro<bool, &'static str, impl Future<Output = &'static str>, usize> {
+        Coro::from(async |handle: Handle<usize, bool>| {
+            assert!(handle.yield_value(42).await);
 
-        let _ = coro.resume();
+            "hello, world!"
+        })
     }
 
     #[test]
     fn yield_recv_return_works() {
-        let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
-            assert!(handle.yield_value(42).await);
-            "hello, world!"
-        });
-
+        let mut coro = yield_recv_return();
         coro = coro.resume().unwrap_pending(|n| {
             assert_eq!(n, 42);
             true
@@ -488,17 +488,14 @@ mod tests {
     // unwrap_pending methods works fine
     #[test]
     fn coro_state_chaining_works() {
-        let s = Coro::from(async |handle: Handle<usize, bool>| {
-            assert!(handle.yield_value(42).await);
-            "hello, world!"
-        })
-        .resume()
-        .unwrap_pending(|n| {
-            assert_eq!(n, 42);
-            true
-        })
-        .resume()
-        .unwrap();
+        let s = yield_recv_return()
+            .resume()
+            .unwrap_pending(|n| {
+                assert_eq!(n, 42);
+                true
+            })
+            .resume()
+            .unwrap();
 
         assert_eq!(s, "hello, world!");
     }
@@ -506,22 +503,13 @@ mod tests {
     #[test]
     #[should_panic = "called `CoroState::unwrap` on a `Pending` value"]
     fn unwrap_on_pending_panics() {
-        let coro = Coro::from(async |handle: Handle<usize, bool>| {
-            assert!(handle.yield_value(42).await);
-            "hello, world!"
-        });
-
-        coro.resume().unwrap();
+        yield_recv_return().resume().unwrap();
     }
 
     #[test]
     #[should_panic = "called `CoroState::unwrap_pending` on a `Complete` value"]
     fn unwrap_pending_on_complete_panics() {
-        let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
-            assert!(handle.yield_value(42).await);
-            "hello, world!"
-        });
-
+        let mut coro = yield_recv_return();
         coro = coro.resume().unwrap_pending(|n| {
             assert_eq!(n, 42);
             true
