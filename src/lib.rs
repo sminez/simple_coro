@@ -1,4 +1,4 @@
-//! An exploration of (ab)using async/await syntax to simplify writing coroutines.
+#![doc = include_str!("../docs.md")]
 #![warn(
     clippy::complexity,
     clippy::correctness,
@@ -26,8 +26,34 @@ use std::{
 /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
 pub type CoroFn<S, R, F> = fn(Handle<S, R>) -> F;
 
-/// A type that can construct a [Coro]
-pub trait AsCoro: Sized {
+/// A type that can construct a [Coro].
+///
+/// If you need to make use of data held within `self` in order to produce your [CoroFn] then you
+/// should look at implementing [IntoCoro] instead.
+///
+/// # Example
+/// ```rust
+/// # use crimes::{AsCoro, Handle};
+/// // Implementing a simple counter using a coroutine (equivalent to std::iter::from_fn)
+/// struct Counter<const N: usize>;
+///
+/// impl<const N: usize> AsCoro for Counter<N> {
+///     type Snd = usize;
+///     type Rcv = ();
+///     type Out = ();
+///
+///     async fn as_coro_fn(handle: Handle<usize>) {
+///         for n in 0..N {
+///             handle.yield_value(n).await
+///         }
+///     }
+/// }
+///
+///
+/// let nums: Vec<usize> = Counter::<6>::as_coro().collect();
+/// assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
+/// ```
+pub trait AsCoro {
     /// The type that will be sent at each await point
     type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
@@ -56,6 +82,29 @@ pub trait AsCoro: Sized {
 }
 
 /// A type that can be converted into a [Coro] from a value.
+///
+/// If you don't need to make use of data held within `self` in order to produce your [CoroFn] then
+/// you should look at implementing [AsCoro] instead.
+///
+/// ```rust
+/// # use crimes::{IntoCoro, Handle};
+/// struct Echo<T> {
+///     initial: T,
+/// }
+///
+/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+///     type Snd = T;
+///     type Rcv = T;
+///     type Out = ();
+///
+///     async fn into_coro_fn(self, handle: Handle<T, T>) {
+///         let mut val = self.initial;
+///         loop {
+///             val = handle.yield_value(val).await;
+///         }
+///     }
+/// }
+/// ```
 pub trait IntoCoro: Sized {
     /// The type that will be sent at each await point
     type Snd: Unpin + 'static;
@@ -69,7 +118,7 @@ pub trait IntoCoro: Sized {
     ///
     /// # Panics
     /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
-    fn into_coro_fn(self) -> CoroFn<Self::Snd, Self::Rcv, impl Future<Output = Self::Out>>;
+    fn into_coro_fn(self, handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
     /// Initialize a new [Coro] from a value.
     fn into_coro(
@@ -78,7 +127,7 @@ pub trait IntoCoro: Sized {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
-            fut: Box::pin((self.into_coro_fn())(Handle {
+            fut: Box::pin(self.into_coro_fn(Handle {
                 _snd: PhantomData,
                 _rcv: PhantomData,
             })),
@@ -89,12 +138,12 @@ pub trait IntoCoro: Sized {
 // Closures with the correct signature can be directly converted into a [Coro].
 impl<F, S, R, Fut, O> From<F> for ReadyCoro<R, O, Fut, S>
 where
-    F: Fn(Handle<S, R>) -> Fut,
+    F: FnMut(Handle<S, R>) -> Fut,
     S: Unpin + 'static,
     R: Unpin + 'static,
     Fut: Future<Output = O>,
 {
-    fn from(f: F) -> Self {
+    fn from(mut f: F) -> Self {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -139,13 +188,16 @@ impl Lifecycle for Ready {}
 pub struct Pending;
 impl Lifecycle for Pending {}
 
-/// A [Coro] that is ready to be resumed.
+/// A [Coro] that is ready to be resumed by calling [resume][Coro::resume].
 pub type ReadyCoro<R, O, F, S> = Coro<R, O, F, Ready, S>;
 
-/// A [Coro] that is pending a response.
+/// A [Coro] that is pending a response from [send][Coro::send].
 pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 
 /// A running coroutine that can make progress by calling [resume][Coro::resume].
+///
+/// A `Coro` can be constructed directly from a [CoroFn] using `Coro::from` or via either of the
+/// [AsCoro] or [IntoCoro] traits.
 pub struct Coro<R, O, F, L, S>
 where
     R: Unpin + 'static,
@@ -178,7 +230,42 @@ where
     S: Unpin + 'static,
     Fut: Future<Output = O>,
 {
-    /// Run this [Coro] to completion using the provided synchronous step function.
+    /// Run this [Coro] to completion using the provided synchronous step function. If you need to
+    /// make use of an asynchronous step function you will need to write out the equivalent loop by
+    /// hand.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, Handle};
+    /// let my_coro = Coro::from(async |handle: Handle<usize, Option<usize>>| {
+    ///     let pos = handle.yield_value(42).await;
+    ///     assert_eq!(pos, Some(5));
+    ///     let pos = handle.yield_value(17).await;
+    ///     assert_eq!(pos, Some(2));
+    ///     let pos = handle.yield_value(68).await;
+    ///     assert!(pos.is_none());
+    ///
+    ///     "done"
+    /// });
+    ///
+    /// let vec = vec![5, 3, 17, 29, 103, 42, 55];
+    /// let res = my_coro.run_sync(|n| vec.iter().position(|&x| x == n));
+    /// assert_eq!(res, "done");
+    /// ```
+    ///
+    /// Equivalent to:
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, HandOwl};
+    /// # let my_coro = Coro::from(async |_: HandOwl| {});
+    /// # let step_fn = |unit| unit;
+    /// let mut coro = my_coro;
+    /// loop {
+    ///     coro = match coro.resume() {
+    ///         CoroState::Complete(res) => return res,
+    ///         CoroState::Pending(c, s) => c.send((step_fn)(s)),
+    ///     };
+    /// }
+    /// ```
     pub fn run_sync<F>(self, mut step_fn: F) -> O
     where
         F: FnMut(S) -> R,
@@ -192,7 +279,16 @@ where
         }
     }
 
-    /// Run the [Coro] to its next yield point.
+    /// Run the [Coro] to its next yield point, returning a [CoroState].
+    ///
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, HandOwl};
+    /// # let coro = Coro::from(async |_: HandOwl| {});
+    /// match coro.resume() {
+    ///     CoroState::Complete(res) => println!("coroutine completed with value: {res:?}"),
+    ///     CoroState::Pending(pending_coro, val) => println!("coroutine yielded {val:?}"),
+    /// };
+    /// ```
     pub fn resume(mut self) -> CoroState<S, O, R, Fut> {
         // SAFETY: we never use this waker for its intended purpose
         let waker = unsafe {
@@ -225,6 +321,22 @@ where
     F: Future<Output = O>,
 {
     /// Send a response to this [Coro] following a call to [Handle::yield_value].
+    ///
+    /// Calling this method coverts a [PendingCoro] into a [ReadyCoro], allowing it to be resumed
+    /// again (and reassigned to an existing variable).
+    ///
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, Handle};
+    /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
+    ///     let n = handle.yield_value(()).await;
+    ///     assert_eq!(n, 70);
+    /// });
+    ///
+    /// coro = match coro.resume() {
+    ///     CoroState::Pending(pending_coro, _) => pending_coro.send(70),
+    ///     CoroState::Complete(_) => return,
+    /// };
+    /// ```
     pub fn send(mut self, r: R) -> ReadyCoro<R, O, F, S> {
         self.state.r = Some(r);
 
@@ -279,9 +391,11 @@ where
     R: Unpin + 'static,
     F: Future<Output = T>,
 {
-    /// The [Coro] yielded via [Handle::yield_value]
+    /// The [Coro] yielded via [yield_value][Handle::yield_value]. Call the [send][Coro::send]
+    /// method on the inner [PendingCoro] to send a value back into the coroutine and convert
+    /// it back to a [ReadyCoro] which can be [resumed][Coro::resume].
     Pending(PendingCoro<R, T, F, S>, S),
-    /// The [Coro] is now complete
+    /// The [Coro] is now complete and has returned a value.
     Complete(T),
 }
 
@@ -291,6 +405,16 @@ where
     R: Unpin + 'static,
     F: Future<Output = T>,
 {
+    /// Returns `true` if this is a [CoroState::Pending] value.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, &Self::Pending(_, _))
+    }
+
+    /// Returns `true` if this is a [CoroState::Complete] value.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, &Self::Complete(_))
+    }
+
     /// Assume that this value is [Pending][CoroState::Pending] and send a response to the
     /// underlying [Coro] using the provided mapping function to unwrap it into a [ReadyCoro].
     ///
@@ -333,6 +457,9 @@ where
     _snd: PhantomData<S>,
     _rcv: PhantomData<R>,
 }
+
+#[doc(hidden)]
+pub type HandOwl = Handle<(), ()>;
 
 impl<S, R> Clone for Handle<S, R>
 where
@@ -556,18 +683,29 @@ mod tests {
         assert_eq!(res, "done");
     }
 
+    struct Echo<T> {
+        initial: T,
+    }
+
+    impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+        type Snd = T;
+        type Rcv = T;
+        type Out = ();
+
+        async fn into_coro_fn(self, handle: Handle<T, T>) {
+            let mut val = self.initial;
+            loop {
+                val = handle.yield_value(val).await;
+            }
+        }
+    }
+
     // Contrived but checking that we are able to pass a Coro between threads and resume it without
     // things exploding in any way. Essentially this is a test that when we have Send Coro that's
     // actually valid.
     #[test]
     fn moving_between_threads_works() {
-        let mut ping_pong = Coro::from(async |handle: Handle<&'static str, &'static str>| {
-            let mut s = "ping";
-            for _ in 0..10 {
-                s = handle.yield_value(s).await;
-            }
-        });
-
+        let mut ping_pong = Echo { initial: "ping" }.into_coro();
         let (tx1, rx1) = channel();
         let (tx2, rx2) = channel();
 
