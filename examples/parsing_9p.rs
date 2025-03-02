@@ -40,15 +40,13 @@ where
 {
     let mut state_machine = NinepParser::initialize();
     loop {
-        state_machine = {
-            match state_machine.resume() {
-                CoroState::Complete(res) => return res,
-                CoroState::Pending(sm, n) => {
-                    println!("{n} bytes requested");
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf)?;
-                    sm.send(buf)
-                }
+        state_machine = match state_machine.resume() {
+            CoroState::Complete(res) => return res,
+            CoroState::Pending(sm, n) => {
+                println!("{n} bytes requested");
+                let mut buf = vec![0; n];
+                r.read_exact(&mut buf)?;
+                sm.send(buf)
             }
         };
     }
@@ -62,15 +60,13 @@ where
 {
     let mut state_machine = NinepParser::initialize();
     loop {
-        state_machine = {
-            match state_machine.resume() {
-                CoroState::Complete(res) => return res,
-                CoroState::Pending(sm, n) => {
-                    println!("{n} bytes requested");
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf).await?;
-                    sm.send(buf)
-                }
+        state_machine = match state_machine.resume() {
+            CoroState::Complete(res) => return res,
+            CoroState::Pending(sm, n) => {
+                println!("{n} bytes requested");
+                let mut buf = vec![0; n];
+                r.read_exact(&mut buf).await?;
+                sm.send(buf)
             }
         };
     }

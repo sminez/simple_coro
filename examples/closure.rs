@@ -1,5 +1,5 @@
 //! Testing out support for closures
-use crimes::{Coro, CoroState, Handle, ReadyCoro};
+use crimes::{Coro, Handle, ReadyCoro};
 
 fn double_nums(
     nums: &[usize],
@@ -17,21 +17,10 @@ fn double_nums(
 
 fn main() {
     println!("intializing coroutine");
-    let mut state_machine = double_nums(&[1, 2, 3]);
-
-    loop {
-        state_machine = {
-            match state_machine.resume() {
-                CoroState::Pending(sm, n) => {
-                    println!("doubling {n}");
-                    sm.send(n * 2)
-                }
-
-                CoroState::Complete(res) => {
-                    println!("state machine finished with result={res:?}");
-                    break;
-                }
-            }
-        };
-    }
+    let coro = double_nums(&[1, 2, 3]);
+    let res = coro.run_sync(|n| {
+        println!("doubling {n}");
+        n * 2
+    });
+    println!("state machine finished with result={res:?}");
 }

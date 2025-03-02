@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format using free async functions
-use crimes::{Coro, CoroState, GenFn, Handle, Ready};
+use crimes::{Coro, CoroFn, CoroState, Handle, Ready};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
@@ -39,15 +39,13 @@ where
 {
     let mut state_machine = T::init();
     loop {
-        state_machine = {
-            match state_machine.resume() {
-                CoroState::Complete(res) => return res,
-                CoroState::Pending(sm, n) => {
-                    println!("{n} bytes requested");
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf)?;
-                    sm.send(buf)
-                }
+        state_machine = match state_machine.resume() {
+            CoroState::Complete(res) => return res,
+            CoroState::Pending(sm, n) => {
+                println!("{n} bytes requested");
+                let mut buf = vec![0; n];
+                r.read_exact(&mut buf)?;
+                sm.send(buf)
             }
         };
     }
@@ -61,15 +59,13 @@ where
 {
     let mut state_machine = T::init();
     loop {
-        state_machine = {
-            match state_machine.resume() {
-                CoroState::Complete(res) => return res,
-                CoroState::Pending(sm, n) => {
-                    println!("{n} bytes requested");
-                    let mut buf = vec![0; n];
-                    r.read_exact(&mut buf).await?;
-                    sm.send(buf)
-                }
+        state_machine = match state_machine.resume() {
+            CoroState::Complete(res) => return res,
+            CoroState::Pending(sm, n) => {
+                println!("{n} bytes requested");
+                let mut buf = vec![0; n];
+                r.read_exact(&mut buf).await?;
+                sm.send(buf)
             }
         };
     }
@@ -101,7 +97,7 @@ async fn read_9p_vec<T: Read9p>(handle: Handle<usize, Vec<u8>>) -> io::Result<Ve
 }
 
 trait Read9p: Sized {
-    fn gen_fn() -> GenFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send>;
+    fn gen_fn() -> CoroFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send>;
 
     fn init()
     -> Coro<Vec<u8>, io::Result<Self>, impl Future<Output = io::Result<Self>> + Send, Ready, usize>
@@ -113,14 +109,14 @@ trait Read9p: Sized {
 macro_rules! impl_read9p {
     ($ty:ty, $fn:ident) => {
         impl Read9p for $ty {
-            fn gen_fn() -> GenFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send> {
+            fn gen_fn() -> CoroFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send> {
                 $fn
             }
         }
     };
     ($bound:ident, $ty:ty, $fn:ident) => {
         impl<$bound: Read9p + Send> Read9p for $ty {
-            fn gen_fn() -> GenFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send> {
+            fn gen_fn() -> CoroFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send> {
                 $fn
             }
         }
