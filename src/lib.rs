@@ -10,8 +10,9 @@
     rustdoc::all,
     clippy::undocumented_unsafe_blocks
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-use std::{
+use core::{
     fmt,
     future::Future,
     marker::PhantomData,
@@ -176,14 +177,17 @@ impl<S, R> Default for SharedState<S, R> {
 }
 
 /// The lifecycle state of a running [Coro]: either [Pending] or [Ready].
+///
+/// This is used as a typestate to enforce that all yields from a [Coro] are handled before they
+/// are resumed.
 pub trait Lifecycle: fmt::Debug {}
 
-/// Ready for the next call to [Coro::resume]
+/// A [Lifecycle] marker denoting that a [Coro] is ready for the next call to [resume][Coro::resume].
 #[derive(Debug)]
 pub struct Ready;
 impl Lifecycle for Ready {}
 
-/// Awaiting a call to [Coro::send].
+/// A [Lifecycle] marker denoting that a [Coro] is awaiting a call to [send][Coro::send].
 #[derive(Debug)]
 pub struct Pending;
 impl Lifecycle for Pending {}
@@ -198,6 +202,105 @@ pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 ///
 /// A `Coro` can be constructed directly from a [CoroFn] using `Coro::from` or via either of the
 /// [AsCoro] or [IntoCoro] traits.
+///
+///
+/// ### Constructing a Coro directly from an async closure
+/// ```rust
+/// use crimes::{Coro, CoroState, Handle};
+///
+/// let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
+///     let say_hello: bool = handle.yield_value(42).await;
+///     if say_hello {
+///         "Hello, World!"
+///     } else {
+///         "Goodbye cruel world!"
+///     }
+/// });
+///
+/// coro = coro.resume().unwrap_pending(|n| {
+///     assert_eq!(n, 42);
+///     true
+/// });
+///
+/// let msg = coro.resume().unwrap();
+/// assert_eq!(msg, "Hello, World!");
+/// ```
+///
+/// ### Implementing [IntoCoro] for types that need access to internal state
+/// ```rust
+/// use crimes::{Coro, CoroState, Handle, IntoCoro};
+///
+/// struct Echo<T> {
+///     initial: T,
+/// }
+///
+/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+///     type Snd = T;
+///     type Rcv = T;
+///     type Out = ();
+///
+///     async fn into_coro_fn(self, handle: Handle<T, T>) {
+///         let mut val = self.initial;
+///         loop {
+///             val = handle.yield_value(val).await;
+///         }
+///     }
+/// }
+///
+/// let mut coro = Echo { initial: "ping" }.into_coro();
+/// coro = coro.resume().unwrap_pending(|s| {
+///     assert_eq!(s, "ping");
+///     "pong"
+/// });
+///
+/// coro = coro.resume().unwrap_pending(|s| {
+///     assert_eq!(s, "pong");
+///     "ping"
+/// });
+/// ```
+///
+/// ### Implementing [AsCoro] for types that serve as constructors
+/// ```rust
+/// use crimes::{Coro, AsCoro, Handle, CoroState};
+/// use std::io::{self, Read};
+///
+/// async fn read_9p_u16(handle: Handle<usize, Vec<u8>>) -> io::Result<u16> {
+///     let n = size_of::<u16>();
+///     let buf = handle.yield_value(n).await;
+///     let data = buf[0..n].try_into().unwrap();
+///
+///     Ok(u16::from_le_bytes(data))
+/// }
+///
+/// struct NinepString;
+///
+/// impl AsCoro for NinepString {
+///     type Snd = usize;
+///     type Rcv = Vec<u8>;
+///     type Out = io::Result<String>;
+///
+///     async fn as_coro_fn(handle: Handle<usize, Vec<u8>>) -> io::Result<String> {
+///         let len = handle.yield_from(read_9p_u16).await? as usize;
+///         let buf = handle.yield_value(len).await;
+///
+///         String::from_utf8(buf)
+///             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+///     }
+/// }
+///
+/// let mut cur = io::Cursor::new(vec![
+///     0x0d, 0x00, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x2c, 0x20, 0xe4, 0xb8, 0x96, 0xe7, 0x95, 0x8c,
+/// ]);
+///
+/// let s = NinepString::as_coro().run_sync(|n| {
+///     let mut buf = vec![0; n];
+///     cur.read_exact(&mut buf).unwrap();
+///     buf
+/// })
+/// .unwrap();
+///
+/// assert_eq!(s, "Hello, 世界");
+/// ```
 pub struct Coro<R, O, F, L, S>
 where
     R: Unpin + 'static,
@@ -350,6 +453,21 @@ where
 
 /// A Generator is a simplified [Coro] that only emits values and does not return a final value.
 /// As such, it can be used as a convenient way to write an [Iterator].
+///
+/// # Example
+/// ```rust
+/// # use crimes::{Generator, Handle};
+/// let counter = |k: usize| {
+///     Generator::from(move |handle: Handle<usize>| async move {
+///         for n in 0..k {
+///             handle.yield_value(n).await;
+///         }
+///     })
+/// };
+///
+/// let nums: Vec<usize> = counter(6).collect();
+/// assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
+/// ```
 pub type Generator<T, F> = Coro<(), (), F, Ready, T>;
 
 impl<T, F> Iterator for Generator<T, F>
@@ -405,12 +523,46 @@ where
     R: Unpin + 'static,
     F: Future<Output = T>,
 {
-    /// Returns `true` if this is a [CoroState::Pending] value.
+    /// Returns `true` if this is a [Pending][CoroState::Pending] value.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, Handle};
+    /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
+    ///     let n = handle.yield_value(()).await;
+    ///     assert_eq!(n, 70);
+    /// });
+    ///
+    /// let state = coro.resume();
+    /// assert_eq!(state.is_pending(), true);
+    ///
+    /// coro = state.unwrap_pending(|_| 70);
+    ///
+    /// let state = coro.resume();
+    /// assert_eq!(state.is_pending(), false);
+    /// ```
     pub fn is_pending(&self) -> bool {
         matches!(self, &Self::Pending(_, _))
     }
 
-    /// Returns `true` if this is a [CoroState::Complete] value.
+    /// Returns `true` if this is a [Complete][CoroState::Complete] value.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, Handle};
+    /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
+    ///     let n = handle.yield_value(()).await;
+    ///     assert_eq!(n, 70);
+    /// });
+    ///
+    /// let state = coro.resume();
+    /// assert_eq!(state.is_complete(), false);
+    ///
+    /// coro = state.unwrap_pending(|_| 70);
+    ///
+    /// let state = coro.resume();
+    /// assert_eq!(state.is_complete(), true);
+    /// ```
     pub fn is_complete(&self) -> bool {
         matches!(self, &Self::Complete(_))
     }
@@ -420,6 +572,17 @@ where
     ///
     /// # Panics
     /// This will panic if the value was [Complete][CoroState::Complete].
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, Handle};
+    /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
+    ///     let n = handle.yield_value(()).await;
+    ///     assert_eq!(n, 70);
+    /// });
+    ///
+    /// coro = coro.resume().unwrap_pending(|_| 70);
+    /// ```
     pub fn unwrap_pending(self, f: impl Fn(S) -> R) -> ReadyCoro<R, T, F, S> {
         match self {
             Self::Pending(coro, s) => coro.send((f)(s)),
@@ -434,6 +597,16 @@ where
     ///
     /// # Panics
     /// This will panic if the value was [Pending][CoroState::Pending].
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, CoroState, Handle};
+    /// let mut coro = Coro::from(async |handle: Handle<(), ()>| {
+    ///     "done"
+    /// });
+    ///
+    /// assert_eq!(coro.resume().unwrap(), "done");
+    /// ```
     pub fn unwrap(self) -> T {
         match self {
             Self::Pending(_, _) => {
@@ -447,7 +620,7 @@ where
 /// A yield handle to facilitate communication between a [Coro] and the logic driving it.
 ///
 /// The only way to obtain a [Handle] is by constructing a [Coro] (via the [AsCoro::as_coro_fn] or
-/// [IntoCoro::into_coro_fn] methods or calling [Coro::from] on an appropriate function).
+/// [IntoCoro::into_coro_fn] methods or calling [Coro::from] on an appropriate async function).
 #[derive(Debug)]
 pub struct Handle<S, R = ()>
 where
@@ -458,6 +631,10 @@ where
     _rcv: PhantomData<R>,
 }
 
+//     ^...^
+//    / o,o \
+//    |):::(|
+//  ====w=w===
 #[doc(hidden)]
 pub type HandOwl = Handle<(), ()>;
 
@@ -485,6 +662,19 @@ where
 {
     /// Yield back to the code that owns the [Coro] calling this method, requesting it to
     /// map an `S` into and `R`.
+    ///
+    /// > This is _not_ a normal [Future] that you can await in an arbitrary async runtime. It is
+    /// > shared communication mechanism between a [Coro] and the logic running it.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, Handle};
+    /// let coro = Coro::from(async |handle: Handle<&'static str>| {
+    ///     handle.yield_value("Hello, World!").await;
+    /// });
+    ///
+    /// coro.resume().unwrap_pending(|s| assert_eq!(s, "Hello, World!"));
+    /// ```
     pub async fn yield_value(&self, snd: S) -> R {
         Yield {
             polled: false,
@@ -494,7 +684,36 @@ where
         .await
     }
 
-    /// Defer yielding to another [Coro] until it completes
+    /// Defer execution to a value that can be turned into another [Coro] until it completes,
+    /// returning the completed value.
+    ///
+    /// The `Snd` and `Rcv` types for the coroutine you are yielding from must match the types used
+    /// by this coroutine. From the point of view of the logic running this [Coro] it will simply
+    /// receive a continuous stream of `Snd` values in response to calling [resume][Coro::resume]
+    /// with no way to distinguish which coroutine they came from.
+    ///
+    /// > This is _not_ a normal [Future] that you can await in an arbitrary async runtime. It is
+    /// > shared communication mechanism between a [Coro] and the logic running it.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{Coro, Handle};
+    /// async fn yield_nums(handle: Handle<usize>) {
+    ///     handle.yield_value(1).await;
+    ///     handle.yield_value(2).await;
+    /// }
+    ///
+    /// let coro = Coro::from(async |handle: Handle<usize>| {
+    ///     handle.yield_value(0).await;
+    ///     handle.yield_from(yield_nums).await;
+    ///     handle.yield_value(3).await;
+    /// });
+    ///
+    /// let mut buf = Vec::with_capacity(4);
+    /// coro.run_sync(|n| buf.push(n));
+    ///
+    /// assert_eq!(&buf, &[0, 1, 2, 3]);
+    /// ```
     pub async fn yield_from<T, C, F>(&self, coro: C) -> T
     where
         C: Into<ReadyCoro<R, T, F, S>>,
@@ -503,7 +722,45 @@ where
         coro.into().fut.await
     }
 
-    /// Defer yielding to another [Coro] type until it completes
+    /// Defer execution to a type that can be turned into another [Coro] until it completes,
+    /// returning the completed value.
+    ///
+    /// The `Snd` and `Rcv` types for the coroutine you are yielding from must match the types used
+    /// by this coroutine. From the point of view of the logic running this [Coro] it will simply
+    /// receive a continuous stream of `Snd` values in response to calling [resume][Coro::resume]
+    /// with no way to distinguish which coroutine they came from.
+    ///
+    /// > This is _not_ a normal [Future] that you can await in an arbitrary async runtime. It is
+    /// > shared communication mechanism between a [Coro] and the logic running it.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use crimes::{AsCoro, Coro, Handle};
+    /// struct CoroRange<const FROM: usize, const TO: usize>;
+    ///
+    /// impl<const FROM: usize, const TO: usize> AsCoro for CoroRange<FROM, TO> {
+    ///     type Snd = usize;
+    ///     type Rcv = ();
+    ///     type Out = ();
+    ///
+    ///     async fn as_coro_fn(handle: Handle<usize>) {
+    ///         for n in FROM..TO {
+    ///             handle.yield_value(n).await
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let coro = Coro::from(async |handle: Handle<usize>| {
+    ///     handle.yield_value(0).await;
+    ///     handle.yield_from_type::<CoroRange<1, 3>, _>().await;
+    ///     handle.yield_value(3).await;
+    /// });
+    ///
+    /// let mut buf = Vec::with_capacity(4);
+    /// coro.run_sync(|n| buf.push(n));
+    ///
+    /// assert_eq!(&buf, &[0, 1, 2, 3]);
+    /// ```
     pub async fn yield_from_type<C, T>(&self) -> T
     where
         C: AsCoro<Snd = S, Rcv = R, Out = T>,
@@ -562,33 +819,8 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+mod core_tests {
     use super::*;
-    use std::io::{self, Cursor, ErrorKind};
-    use std::{sync::mpsc::channel, thread::spawn};
-
-    fn tokio_boom() -> ReadyCoro<(), &'static str, impl Future<Output = &'static str>, ()> {
-        Coro::from(async |_: Handle<()>| {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-            "boom!"
-        })
-    }
-
-    #[tokio::test]
-    #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
-    async fn awaiting_a_future_that_needs_a_waker_panics() {
-        let _ = tokio_boom().resume();
-    }
-
-    // This is handled on the tokio side by checking if the tokio runtime is present but tested
-    // here to document the difference in the error message received. In both cases (this and the
-    // above) awaiting a future that needs a Waker results in a panic.
-    #[test]
-    #[should_panic = "there is no reactor running, must be called from the context of a Tokio 1.x runtime"]
-    fn awaiting_a_tokio_future_panics_outside_of_tokio() {
-        let _ = tokio_boom().resume();
-    }
 
     fn yield_recv_return()
     -> ReadyCoro<bool, &'static str, impl Future<Output = &'static str>, usize> {
@@ -681,6 +913,85 @@ mod tests {
     fn run_sync_works() {
         let res = double_nums(&[1, 2, 3]).run_sync(|n| n * 2);
         assert_eq!(res, "done");
+    }
+
+    // Using const generics to implement a counter generator
+    struct Counter<const N: usize>;
+
+    impl<const N: usize> AsCoro for Counter<N> {
+        type Snd = usize;
+        type Rcv = ();
+        type Out = ();
+
+        async fn as_coro_fn(handle: Handle<usize>) {
+            for n in 0..N {
+                handle.yield_value(n).await
+            }
+        }
+    }
+
+    #[test]
+    fn generator_iter_works() {
+        let nums: Vec<usize> = Counter::<6>::as_coro().collect();
+        assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn yield_from_type_works() {
+        let coro = Coro::from(async |handle: Handle<usize>| {
+            handle.yield_from_type::<Counter<6>, _>().await
+        });
+        let total: usize = coro.sum();
+
+        assert_eq!(total, 1 + 2 + 3 + 4 + 5);
+    }
+
+    // This _doesn't_ work when you are closing over a reference (like in the double_nums case
+    // above) due to the Coro capturing a lifetime. Need to work out what is different when you
+    // define it as a free function as that works...
+    #[test]
+    fn capturing_nested_closure_works() {
+        let g = |k: usize| {
+            Generator::from(move |handle: Handle<usize>| async move {
+                for n in 0..k {
+                    handle.yield_value(n).await;
+                }
+            })
+        };
+
+        let nums: Vec<usize> = g(6).collect();
+        assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod std_tests {
+    use super::*;
+
+    use std::io::{self, Cursor, ErrorKind};
+    use std::{sync::mpsc::channel, thread::spawn};
+
+    fn tokio_boom() -> ReadyCoro<(), &'static str, impl Future<Output = &'static str>, ()> {
+        Coro::from(async |_: Handle<()>| {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            "boom!"
+        })
+    }
+
+    #[tokio::test]
+    #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
+    async fn awaiting_a_future_that_needs_a_waker_panics() {
+        let _ = tokio_boom().resume();
+    }
+
+    // This is handled on the tokio side by checking if the tokio runtime is present but tested
+    // here to document the difference in the error message received. In both cases (this and the
+    // above) awaiting a future that needs a Waker results in a panic.
+    #[test]
+    #[should_panic = "there is no reactor running, must be called from the context of a Tokio 1.x runtime"]
+    fn awaiting_a_tokio_future_panics_outside_of_tokio() {
+        let _ = tokio_boom().resume();
     }
 
     struct Echo<T> {
@@ -830,53 +1141,5 @@ mod tests {
             .expect("parsing to be successful");
 
         assert_eq!(parsed, &["Hello", "世界"]);
-    }
-
-    // Using const generics to implement a counter generator
-    struct Counter<const N: usize>;
-
-    impl<const N: usize> AsCoro for Counter<N> {
-        type Snd = usize;
-        type Rcv = ();
-        type Out = ();
-
-        async fn as_coro_fn(handle: Handle<usize>) {
-            for n in 0..N {
-                handle.yield_value(n).await
-            }
-        }
-    }
-
-    #[test]
-    fn generator_iter_works() {
-        let nums: Vec<usize> = Counter::<6>::as_coro().collect();
-        assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn yield_from_type_works() {
-        let coro = Coro::from(async |handle: Handle<usize>| {
-            handle.yield_from_type::<Counter<6>, _>().await
-        });
-        let total: usize = coro.sum();
-
-        assert_eq!(total, 1 + 2 + 3 + 4 + 5);
-    }
-
-    // This _doesn't_ work when you are closing over a reference (like in the double_nums case
-    // above) due to the Coro capturing a lifetime. Need to work out what is different when you
-    // define it as a free function as that works...
-    #[test]
-    fn capturing_nested_closure_works() {
-        let g = |k: usize| {
-            Generator::from(move |handle: Handle<usize>| async move {
-                for n in 0..k {
-                    handle.yield_value(n).await;
-                }
-            })
-        };
-
-        let nums: Vec<usize> = g(6).collect();
-        assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
     }
 }

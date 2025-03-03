@@ -3,6 +3,10 @@ name = "crimes"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["std"]
+std = []
+
 [dependencies]
 
 [dev-dependencies]

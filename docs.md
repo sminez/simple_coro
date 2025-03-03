@@ -10,11 +10,14 @@ are alright with that you can play around with coroutines today.
 > Please note that the top level API provided by this crate is not 100% compatible with the current
 > API that is proposed on nightly. 
 
+This crate is [no_std][3] compatible.
+
+
 ## Coroutines from async functions
 
 The [Coro] struct represents a running coroutine which can be driven externally from by calling
-[Coro::resume]. The quickest way to create a `Coro` is to build one from an async function with the
-appropriate signature:
+[resume][Coro::resume]. The quickest way to create a `Coro` is to build one from an async function
+with the appropriate signature:
 
 ```rust
 use crimes::{Coro, CoroState, Handle};
@@ -77,3 +80,4 @@ traits, depending on whether you need to make use of state held within the imple
   [0]: https://doc.rust-lang.org/std/ops/trait.Coroutine.html
   [1]: https://doc.rust-lang.org/std/future/trait.IntoFuture.html#await-desugaring
   [2]: https://doc.rust-lang.org/std/future/trait.Future.html
+  [3]: https://github.com/rust-lang/rfcs/blob/master/text/1184-stabilize-no_std.md
