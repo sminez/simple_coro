@@ -56,9 +56,9 @@ pub type CoroFn<S, R, F> = fn(Handle<S, R>) -> F;
 /// ```
 pub trait AsCoro {
     /// The type that will be sent at each await point
-    type Snd: Unpin + 'static;
+    type Snd: Unpin;
     /// The type expected to be received at each await point
-    type Rcv: Unpin + 'static;
+    type Rcv: Unpin;
     /// The output of running the coroutine to completion
     type Out;
 
@@ -70,7 +70,7 @@ pub trait AsCoro {
     fn as_coro_fn(handle: Handle<Self::Snd, Self::Rcv>) -> impl Future<Output = Self::Out>;
 
     /// Initialize a new [Coro] using this type as a constructor.
-    fn as_coro() -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+    fn as_coro() -> ReadyCoro<Self::Snd, Self::Rcv, Self::Out, impl Future<Output = Self::Out>> {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -93,7 +93,7 @@ pub trait AsCoro {
 ///     initial: T,
 /// }
 ///
-/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+/// impl<T: Unpin > IntoCoro for Echo<T> {
 ///     type Snd = T;
 ///     type Rcv = T;
 ///     type Out = ();
@@ -108,9 +108,9 @@ pub trait AsCoro {
 /// ```
 pub trait IntoCoro: Sized {
     /// The type that will be sent at each await point
-    type Snd: Unpin + 'static;
+    type Snd: Unpin;
     /// The type expected to be received at each await point
-    type Rcv: Unpin + 'static;
+    type Rcv: Unpin;
     /// The output of running the coroutine to completion
     type Out;
 
@@ -124,7 +124,7 @@ pub trait IntoCoro: Sized {
     /// Initialize a new [Coro] from a value.
     fn into_coro(
         self,
-    ) -> ReadyCoro<Self::Rcv, Self::Out, impl Future<Output = Self::Out>, Self::Snd> {
+    ) -> ReadyCoro<Self::Snd, Self::Rcv, Self::Out, impl Future<Output = Self::Out>> {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -137,14 +137,14 @@ pub trait IntoCoro: Sized {
 }
 
 // Closures with the correct signature can be directly converted into a [Coro].
-impl<F, S, R, Fut, O> From<F> for ReadyCoro<R, O, Fut, S>
+impl<F, S, R, Fut, O> From<F> for ReadyCoro<S, R, O, Fut>
 where
-    F: FnMut(Handle<S, R>) -> Fut,
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    F: FnOnce(Handle<S, R>) -> Fut,
+    S: Unpin,
+    R: Unpin,
     Fut: Future<Output = O>,
 {
-    fn from(mut f: F) -> Self {
+    fn from(f: F) -> Self {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -193,10 +193,10 @@ pub struct Pending;
 impl Lifecycle for Pending {}
 
 /// A [Coro] that is ready to be resumed by calling [resume][Coro::resume].
-pub type ReadyCoro<R, O, F, S> = Coro<R, O, F, Ready, S>;
+pub type ReadyCoro<S, R, O, F> = Coro<S, R, O, F, Ready>;
 
 /// A [Coro] that is pending a response from [send][Coro::send].
-pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
+pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 
 /// A running coroutine that can make progress by calling [resume][Coro::resume].
 ///
@@ -234,7 +234,7 @@ pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 ///     initial: T,
 /// }
 ///
-/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+/// impl<T: Unpin > IntoCoro for Echo<T> {
 ///     type Snd = T;
 ///     type Rcv = T;
 ///     type Out = ();
@@ -301,10 +301,10 @@ pub type PendingCoro<R, O, F, S> = Coro<R, O, F, Pending, S>;
 ///
 /// assert_eq!(s, "Hello, 世界");
 /// ```
-pub struct Coro<R, O, F, L, S>
+pub struct Coro<S, R, O, F, L>
 where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     F: Future<Output = O>,
     L: Lifecycle,
 {
@@ -313,10 +313,12 @@ where
     fut: Pin<Box<F>>,
 }
 
-impl<R, O, F, L, S> fmt::Debug for Coro<R, O, F, L, S>
+// FIXME: CHANGE THE BOUNDS TO THIS INSTEAD -> pub struct Coro<S, R, O, F, L>
+
+impl<S, R, O, F, L> fmt::Debug for Coro<S, R, O, F, L>
 where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     F: Future<Output = O>,
     L: Lifecycle,
 {
@@ -327,10 +329,10 @@ where
     }
 }
 
-impl<R, O, Fut, S> Coro<R, O, Fut, Ready, S>
+impl<S, R, O, Fut> Coro<S, R, O, Fut, Ready>
 where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     Fut: Future<Output = O>,
 {
     /// Run this [Coro] to completion using the provided synchronous step function. If you need to
@@ -392,7 +394,7 @@ where
     ///     CoroState::Pending(pending_coro, val) => println!("coroutine yielded {val:?}"),
     /// };
     /// ```
-    pub fn resume(mut self) -> CoroState<S, O, R, Fut> {
+    pub fn resume(mut self) -> CoroState<S, R, O, Fut> {
         // SAFETY: we never use this waker for its intended purpose
         let waker = unsafe {
             Waker::from_raw(RawWaker::new(
@@ -417,10 +419,10 @@ where
     }
 }
 
-impl<R, O, F, S> Coro<R, O, F, Pending, S>
+impl<S, R, O, F> Coro<S, R, O, F, Pending>
 where
-    R: Unpin + 'static,
-    S: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     F: Future<Output = O>,
 {
     /// Send a response to this [Coro] following a call to [Handle::yield_value].
@@ -440,7 +442,7 @@ where
     ///     CoroState::Complete(_) => return,
     /// };
     /// ```
-    pub fn send(mut self, r: R) -> ReadyCoro<R, O, F, S> {
+    pub fn send(mut self, r: R) -> ReadyCoro<S, R, O, F> {
         self.state.r = Some(r);
 
         Coro {
@@ -468,11 +470,11 @@ where
 /// let nums: Vec<usize> = counter(6).collect();
 /// assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
 /// ```
-pub type Generator<T, F> = Coro<(), (), F, Ready, T>;
+pub type Generator<T, F> = Coro<T, (), (), F, Ready>;
 
 impl<T, F> Iterator for Generator<T, F>
 where
-    T: Unpin + 'static,
+    T: Unpin,
     F: Future<Output = ()>,
 {
     type Item = T;
@@ -503,24 +505,24 @@ where
 /// The intermediate state of a [Coro] while it is executing
 #[derive(Debug)]
 #[must_use]
-pub enum CoroState<S, T, R, F>
+pub enum CoroState<S, R, T, F>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     F: Future<Output = T>,
 {
     /// The [Coro] yielded via [yield_value][Handle::yield_value]. Call the [send][Coro::send]
     /// method on the inner [PendingCoro] to send a value back into the coroutine and convert
     /// it back to a [ReadyCoro] which can be [resumed][Coro::resume].
-    Pending(PendingCoro<R, T, F, S>, S),
+    Pending(PendingCoro<S, R, T, F>, S),
     /// The [Coro] is now complete and has returned a value.
     Complete(T),
 }
 
-impl<S, T, R, F> CoroState<S, T, R, F>
+impl<S, R, T, F> CoroState<S, R, T, F>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
     F: Future<Output = T>,
 {
     /// Returns `true` if this is a [Pending][CoroState::Pending] value.
@@ -583,7 +585,7 @@ where
     ///
     /// coro = coro.resume().unwrap_pending(|_| 70);
     /// ```
-    pub fn unwrap_pending(self, f: impl Fn(S) -> R) -> ReadyCoro<R, T, F, S> {
+    pub fn unwrap_pending(self, f: impl Fn(S) -> R) -> ReadyCoro<S, R, T, F> {
         match self {
             Self::Pending(coro, s) => coro.send((f)(s)),
             Self::Complete(_) => {
@@ -624,8 +626,8 @@ where
 #[derive(Debug)]
 pub struct Handle<S, R = ()>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
     _snd: PhantomData<S>,
     _rcv: PhantomData<R>,
@@ -640,8 +642,8 @@ pub type HandOwl = Handle<(), ()>;
 
 impl<S, R> Clone for Handle<S, R>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
     fn clone(&self) -> Self {
         *self
@@ -650,15 +652,15 @@ where
 
 impl<S, R> Copy for Handle<S, R>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
 }
 
 impl<S, R> Handle<S, R>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
     /// Yield back to the code that owns the [Coro] calling this method, requesting it to
     /// map an `S` into and `R`.
@@ -716,7 +718,7 @@ where
     /// ```
     pub async fn yield_from<T, C, F>(&self, coro: C) -> T
     where
-        C: Into<ReadyCoro<R, T, F, S>>,
+        C: Into<ReadyCoro<S, R, T, F>>,
         F: Future<Output = T>,
     {
         coro.into().fut.await
@@ -771,8 +773,8 @@ where
 
 struct Yield<S, R>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
     polled: bool,
     s: Option<S>,
@@ -781,8 +783,8 @@ where
 
 impl<S, R> Future for Yield<S, R>
 where
-    S: Unpin + 'static,
-    R: Unpin + 'static,
+    S: Unpin,
+    R: Unpin,
 {
     type Output = R;
 
@@ -823,7 +825,7 @@ mod core_tests {
     use super::*;
 
     fn yield_recv_return()
-    -> ReadyCoro<bool, &'static str, impl Future<Output = &'static str>, usize> {
+    -> ReadyCoro<usize, bool, &'static str, impl Future<Output = &'static str>> {
         Coro::from(async |handle: Handle<usize, bool>| {
             assert!(handle.yield_value(42).await);
 
@@ -884,7 +886,7 @@ mod core_tests {
     // around the lifetime of the coro being longer than the lifetime of the nums reference
     fn double_nums(
         nums: &[usize],
-    ) -> ReadyCoro<usize, &'static str, impl Future<Output = &'static str>, usize> {
+    ) -> ReadyCoro<usize, usize, &'static str, impl Future<Output = &'static str>> {
         Coro::from(async |handle: Handle<usize, usize>| {
             for &n in nums.iter() {
                 let doubled = handle.yield_value(n).await;
@@ -971,7 +973,7 @@ mod std_tests {
     use std::io::{self, Cursor, ErrorKind};
     use std::{sync::mpsc::channel, thread::spawn};
 
-    fn tokio_boom() -> ReadyCoro<(), &'static str, impl Future<Output = &'static str>, ()> {
+    fn tokio_boom() -> ReadyCoro<(), (), &'static str, impl Future<Output = &'static str>> {
         Coro::from(async |_: Handle<()>| {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -998,7 +1000,7 @@ mod std_tests {
         initial: T,
     }
 
-    impl<T: Unpin + 'static> IntoCoro for Echo<T> {
+    impl<T: Unpin> IntoCoro for Echo<T> {
         type Snd = T;
         type Rcv = T;
         type Out = ();

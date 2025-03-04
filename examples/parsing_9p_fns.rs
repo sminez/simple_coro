@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format using free async functions
-use crimes::{Coro, CoroFn, CoroState, Handle, Ready};
+use crimes::{CoroFn, CoroState, Handle, ReadyCoro};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},
@@ -100,7 +100,7 @@ trait Read9p: Sized {
     fn gen_fn() -> CoroFn<usize, Vec<u8>, impl Future<Output = io::Result<Self>> + Send>;
 
     fn init()
-    -> Coro<Vec<u8>, io::Result<Self>, impl Future<Output = io::Result<Self>> + Send, Ready, usize>
+    -> ReadyCoro<usize, Vec<u8>, io::Result<Self>, impl Future<Output = io::Result<Self>> + Send>
     {
         Self::gen_fn().into()
     }

@@ -3,7 +3,7 @@ use crimes::{Coro, Handle, ReadyCoro};
 
 fn double_nums(
     nums: &[usize],
-) -> ReadyCoro<usize, &'static str, impl Future<Output = &'static str>, usize> {
+) -> ReadyCoro<usize, usize, &'static str, impl Future<Output = &'static str>> {
     Coro::from(async |handle: Handle<usize, usize>| {
         for &n in nums.iter() {
             println!("  requesting that {n} gets doubled...");
