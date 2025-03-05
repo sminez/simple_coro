@@ -2,6 +2,21 @@
 name = "simple_coro"
 version = "0.1.0"
 edition = "2024"
+authors = ["sminez <innes.andersonmorrison@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/sminez/simple_coro"
+readme = "README.md"
+description = "(ab)using async/await to write simple state-machine based coroutines"
+documentation = "https://docs.rs/simple_coro"
+keywords      = ["coroutine", "generator"]
+categories    = ["concurrency", "data-structures", "no-std"]
+
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+    "docs.md"
+]
 
 [features]
 default = ["std"]
