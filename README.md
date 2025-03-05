@@ -1,6 +1,9 @@
-# Crimes
+# Simple Coro
 
-Use crimes to write ergonomic state machines (coroutines) using futures.
+(ab)using Rust's async/await syntax to write simple state-machine based coroutines.
+
+> :warning: Formally known as [crimes][0] (see below) :warning:
+
 
 ## Why is this criminal?
 
@@ -8,22 +11,22 @@ Originally the "crimes" aspect of this was due to it being a quickly hacked
 together proof of concept that had a safe(ish) API. As I've continued to work
 on things it's beginning to look more and more reasonable but I'd still argue
 that this is probably _not_ what you want, particularly if you are happy using
-the nightly compiler support for [coroutines](https://doc.rust-lang.org/std/ops/trait.Coroutine.html).
+the nightly compiler support for [coroutines][1].
 
-If you want to see how things are used, take a look at the test suite in `lib.rs`
-or the files in the `examples` directory.
+## A note on API changes from the blog post
 
-
-## A note on API changes
-
-After writing my [Socrates is a state machine][0] blog post I couldn't resist
+After writing my [Socrates is a state machine][2] blog post I couldn't resist
 trying to simplify the API, so rather than what is presented there (a paired
 runner and state machine) the updated API now handles everything with a single
 struct: `Coro`. It also enforces that replies are sent before calling `resume`
-again via a lifecycle typestate.
+again via a lifecycle typestate and provides a number of quality of life
+functionality that simplifies writing simple coroutines.
+
+To take a look through the API as it was when I wrote the blog post you'll need
+to go [here][3].
 
 ```rust
-use crimes::{Coro, CoroState, Handle};
+use simple_coro::{Coro, CoroState, Handle};
 use std::io::{self, Cursor, ErrorKind};
 
 // ["Hello", "世界"] in 9p wire format.
@@ -100,7 +103,7 @@ async fn read_9p_string_vec(handle: Handle<usize, Vec<u8>>) -> io::Result<Vec<St
 }
 ```
 
-To take a look through the API as it was when I wrote the blog post you'll need to go [here][1].
-
-  [0]: https://www.sminez.dev/socrates-is-a-state-machine/
-  [1]: https://github.com/sminez/crimes/tree/1ea8a028f861b7d6061f3153af5532fc77856058
+  [0]: https://www.sminez.dev/socrates-is-a-state-machine/#the-rest-of-the-owl
+  [1]: https://doc.rust-lang.org/std/ops/trait.Coroutine.html
+  [2]: https://www.sminez.dev/socrates-is-a-state-machine/
+  [3]: https://github.com/sminez/crimes/tree/1ea8a028f861b7d6061f3153af5532fc77856058

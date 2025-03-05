@@ -20,7 +20,7 @@ The [Coro] struct represents a running coroutine which can be driven externally 
 with the appropriate signature:
 
 ```rust
-use crimes::{Coro, CoroState, Handle};
+use simple_coro::{Coro, CoroState, Handle};
 
 let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
     let say_hello: bool = handle.yield_value(42).await;

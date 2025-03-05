@@ -1,5 +1,5 @@
 // "use crimes" was too good to pass up
-use crimes::{AsCoro, CoroState, Handle};
+use simple_coro::{AsCoro, CoroState, Handle};
 use std::{io, marker::PhantomData};
 use tokio::io::{AsyncRead, AsyncReadExt};
 

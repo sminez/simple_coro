@@ -45,14 +45,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
-name = "crimes"
-version = "0.1.0"
-dependencies = [
- "simple_test_case",
- "tokio",
-]
-
-[[package]]
 name = "gimli"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -128,6 +120,14 @@ name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
+
+[[package]]
+name = "simple_coro"
+version = "0.1.0"
+dependencies = [
+ "simple_test_case",
+ "tokio",
+]
 
 [[package]]
 name = "simple_test_case"

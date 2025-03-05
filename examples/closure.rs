@@ -1,5 +1,5 @@
 //! Testing out support for closures
-use crimes::{Coro, Handle, ReadyCoro};
+use simple_coro::{Coro, Handle, ReadyCoro};
 
 fn double_nums(
     nums: &[usize],

@@ -1,5 +1,5 @@
 //! An example of how to use crimes to parse the 9p protocol wire format using free async functions
-use crimes::{CoroFn, CoroState, Handle, ReadyCoro};
+use simple_coro::{CoroFn, CoroState, Handle, ReadyCoro};
 use std::{
     future::Future,
     io::{self, Cursor, ErrorKind, Read},

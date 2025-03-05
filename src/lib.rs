@@ -34,7 +34,7 @@ pub type CoroFn<S, R, F> = fn(Handle<S, R>) -> F;
 ///
 /// # Example
 /// ```rust
-/// # use crimes::{AsCoro, Handle};
+/// # use simple_coro::{AsCoro, Handle};
 /// // Implementing a simple counter using a coroutine (equivalent to std::iter::from_fn)
 /// struct Counter<const N: usize>;
 ///
@@ -88,7 +88,7 @@ pub trait AsCoro {
 /// you should look at implementing [AsCoro] instead.
 ///
 /// ```rust
-/// # use crimes::{IntoCoro, Handle};
+/// # use simple_coro::{IntoCoro, Handle};
 /// struct Echo<T> {
 ///     initial: T,
 /// }
@@ -206,7 +206,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 ///
 /// ### Constructing a Coro directly from an async closure
 /// ```rust
-/// use crimes::{Coro, CoroState, Handle};
+/// use simple_coro::{Coro, CoroState, Handle};
 ///
 /// let mut coro = Coro::from(async |handle: Handle<usize, bool>| {
 ///     let say_hello: bool = handle.yield_value(42).await;
@@ -228,7 +228,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 ///
 /// ### Implementing [IntoCoro] for types that need access to internal state
 /// ```rust
-/// use crimes::{Coro, CoroState, Handle, IntoCoro};
+/// use simple_coro::{Coro, CoroState, Handle, IntoCoro};
 ///
 /// struct Echo<T> {
 ///     initial: T,
@@ -261,7 +261,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 ///
 /// ### Implementing [AsCoro] for types that serve as constructors
 /// ```rust
-/// use crimes::{Coro, AsCoro, Handle, CoroState};
+/// use simple_coro::{Coro, AsCoro, Handle, CoroState};
 /// use std::io::{self, Read};
 ///
 /// async fn read_9p_u16(handle: Handle<usize, Vec<u8>>) -> io::Result<u16> {
@@ -341,7 +341,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, Handle};
+    /// # use simple_coro::{Coro, Handle};
     /// let my_coro = Coro::from(async |handle: Handle<usize, Option<usize>>| {
     ///     let pos = handle.yield_value(42).await;
     ///     assert_eq!(pos, Some(5));
@@ -360,7 +360,7 @@ where
     ///
     /// Equivalent to:
     /// ```rust
-    /// # use crimes::{Coro, CoroState, HandOwl};
+    /// # use simple_coro::{Coro, CoroState, HandOwl};
     /// # let my_coro = Coro::from(async |_: HandOwl| {});
     /// # let step_fn = |unit| unit;
     /// let mut coro = my_coro;
@@ -387,7 +387,7 @@ where
     /// Run the [Coro] to its next yield point, returning a [CoroState].
     ///
     /// ```rust
-    /// # use crimes::{Coro, CoroState, HandOwl};
+    /// # use simple_coro::{Coro, CoroState, HandOwl};
     /// # let coro = Coro::from(async |_: HandOwl| {});
     /// match coro.resume() {
     ///     CoroState::Complete(res) => println!("coroutine completed with value: {res:?}"),
@@ -431,7 +431,7 @@ where
     /// again (and reassigned to an existing variable).
     ///
     /// ```rust
-    /// # use crimes::{Coro, CoroState, Handle};
+    /// # use simple_coro::{Coro, CoroState, Handle};
     /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
     ///     let n = handle.yield_value(()).await;
     ///     assert_eq!(n, 70);
@@ -458,7 +458,7 @@ where
 ///
 /// # Example
 /// ```rust
-/// # use crimes::{Generator, Handle};
+/// # use simple_coro::{Generator, Handle};
 /// let counter = |k: usize| {
 ///     Generator::from(move |handle: Handle<usize>| async move {
 ///         for n in 0..k {
@@ -529,7 +529,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, CoroState, Handle};
+    /// # use simple_coro::{Coro, CoroState, Handle};
     /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
     ///     let n = handle.yield_value(()).await;
     ///     assert_eq!(n, 70);
@@ -551,7 +551,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, CoroState, Handle};
+    /// # use simple_coro::{Coro, CoroState, Handle};
     /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
     ///     let n = handle.yield_value(()).await;
     ///     assert_eq!(n, 70);
@@ -577,7 +577,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, CoroState, Handle};
+    /// # use simple_coro::{Coro, CoroState, Handle};
     /// let mut coro = Coro::from(async |handle: Handle<(), usize>| {
     ///     let n = handle.yield_value(()).await;
     ///     assert_eq!(n, 70);
@@ -602,7 +602,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, CoroState, Handle};
+    /// # use simple_coro::{Coro, CoroState, Handle};
     /// let mut coro = Coro::from(async |handle: Handle<(), ()>| {
     ///     "done"
     /// });
@@ -670,7 +670,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, Handle};
+    /// # use simple_coro::{Coro, Handle};
     /// let coro = Coro::from(async |handle: Handle<&'static str>| {
     ///     handle.yield_value("Hello, World!").await;
     /// });
@@ -699,7 +699,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{Coro, Handle};
+    /// # use simple_coro::{Coro, Handle};
     /// async fn yield_nums(handle: Handle<usize>) {
     ///     handle.yield_value(1).await;
     ///     handle.yield_value(2).await;
@@ -737,7 +737,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// # use crimes::{AsCoro, Coro, Handle};
+    /// # use simple_coro::{AsCoro, Coro, Handle};
     /// struct CoroRange<const FROM: usize, const TO: usize>;
     ///
     /// impl<const FROM: usize, const TO: usize> AsCoro for CoroRange<FROM, TO> {
