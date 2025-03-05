@@ -313,8 +313,6 @@ where
     fut: Pin<Box<F>>,
 }
 
-// FIXME: CHANGE THE BOUNDS TO THIS INSTEAD -> pub struct Coro<S, R, O, F, L>
-
 impl<S, R, O, F, L> fmt::Debug for Coro<S, R, O, F, L>
 where
     S: Unpin,
@@ -633,10 +631,10 @@ where
     _rcv: PhantomData<R>,
 }
 
-//     ^...^
-//    / o,o \
-//    |):::(|
-//  ====w=w===
+///     ^...^
+///    / o,o \
+///    |):::(|
+///  ====w=w===
 #[doc(hidden)]
 pub type HandOwl = Handle<(), ()>;
 
