@@ -1,5 +1,7 @@
 # Simple Coro
 
+[![Build](https://github.com/sminez/simple_coro/workflows/Build/badge.svg)](https://github.com/sminez/simple_coro/actions?query=workflow%3ABuild) [![crates.io version](https://img.shields.io/crates/v/simple_coro)](https://crates.io/crates/simple_coro) [![docs.rs](https://img.shields.io/docsrs/simple_coro?logo=rust)](https://docs.rs/simple_coro)
+
 (ab)using Rust's async/await syntax to write simple state-machine based coroutines.
 
 > :warning: Formally known as [crimes][0] (see below) :warning:
