@@ -10,8 +10,6 @@ are alright with that you can play around with coroutines today.
 > Please note that the top level API provided by this crate is not 100% compatible with the current
 > API that is proposed on nightly. 
 
-This crate is [no_std][3] compatible.
-
 
 ## Coroutines from async functions
 

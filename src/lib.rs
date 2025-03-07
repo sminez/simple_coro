@@ -10,7 +10,6 @@
     rustdoc::all,
     clippy::undocumented_unsafe_blocks
 )]
-#![cfg_attr(not(feature = "std"), no_std)]
 
 use core::{
     fmt,
@@ -819,8 +818,13 @@ where
 }
 
 #[cfg(test)]
-mod core_tests {
+mod tests {
     use super::*;
+    use std::{
+        io::{self, Cursor, ErrorKind},
+        sync::mpsc::channel,
+        thread::spawn,
+    };
 
     fn yield_recv_return()
     -> ReadyCoro<usize, bool, &'static str, impl Future<Output = &'static str>> {
@@ -962,14 +966,6 @@ mod core_tests {
         let nums: Vec<usize> = g(6).collect();
         assert_eq!(nums, vec![0, 1, 2, 3, 4, 5]);
     }
-}
-
-#[cfg(all(test, feature = "std"))]
-mod std_tests {
-    use super::*;
-
-    use std::io::{self, Cursor, ErrorKind};
-    use std::{sync::mpsc::channel, thread::spawn};
 
     fn tokio_boom() -> ReadyCoro<(), (), &'static str, impl Future<Output = &'static str>> {
         Coro::from(async |_: Handle<()>| {

@@ -1,6 +1,6 @@
 [package]
 name = "simple_coro"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["sminez <innes.andersonmorrison@gmail.com>"]
 license = "MIT"
@@ -9,7 +9,7 @@ readme = "README.md"
 description = "(ab)using async/await to write simple state-machine based coroutines"
 documentation = "https://docs.rs/simple_coro"
 keywords      = ["coroutine", "generator"]
-categories    = ["concurrency", "data-structures", "no-std"]
+categories    = ["concurrency", "data-structures"]
 
 include = [
     "src/**/*",
@@ -17,10 +17,6 @@ include = [
     "README.md",
     "docs.md"
 ]
-
-[features]
-default = ["std"]
-std = []
 
 [dependencies]
 
