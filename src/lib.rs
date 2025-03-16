@@ -156,7 +156,7 @@ where
 }
 
 const DENY_FUT: &str = "a Coro is not permitted to await a future that uses an arbitrary Waker";
-const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| panic!("{DENY_FUT}"),
     |_| panic!("{DENY_FUT}"),
     |_| panic!("{DENY_FUT}"),
@@ -786,6 +786,10 @@ where
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<R> {
+        if *ctx.waker().vtable() != WAKER_VTABLE {
+            panic!("this future must be awaited inside of a Coro");
+        }
+
         if self.polled {
             // SAFETY: we can only poll this future using a waker wrapping State<S, R> and we only
             // ever access the shared state here or inside of Coro::resume which never execute at
@@ -822,6 +826,7 @@ mod tests {
     use super::*;
     use std::{
         io::{self, Cursor, ErrorKind},
+        pin::pin,
         sync::mpsc::channel,
         thread::spawn,
     };
@@ -882,6 +887,20 @@ mod tests {
             assert_eq!(n, 42);
             true
         });
+    }
+
+    #[test]
+    #[should_panic = "this future must be awaited inside of a Coro"]
+    fn manually_polling_yield_panics() {
+        let coro = Coro::from(async |handle: Handle<()>| {
+            let mut fut = handle.yield_value(());
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+
+            let _ = pin!(fut).as_mut().poll(&mut cx);
+        });
+
+        let _ = coro.resume();
     }
 
     // Trying to write double_nums as a closure that returns a Coro results in lifetime errors
