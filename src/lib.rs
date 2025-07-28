@@ -55,7 +55,7 @@ pub type CoroFn<S, R, F> = fn(Handle<S, R>) -> F;
 /// ```
 pub trait AsCoro {
     /// The type that will be sent at each await point
-    type Snd: Unpin;
+    type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
     type Rcv: Unpin;
     /// The output of running the coroutine to completion
@@ -92,7 +92,7 @@ pub trait AsCoro {
 ///     initial: T,
 /// }
 ///
-/// impl<T: Unpin > IntoCoro for Echo<T> {
+/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
 ///     type Snd = T;
 ///     type Rcv = T;
 ///     type Out = ();
@@ -107,7 +107,7 @@ pub trait AsCoro {
 /// ```
 pub trait IntoCoro: Sized {
     /// The type that will be sent at each await point
-    type Snd: Unpin;
+    type Snd: Unpin + 'static;
     /// The type expected to be received at each await point
     type Rcv: Unpin;
     /// The output of running the coroutine to completion
@@ -139,7 +139,7 @@ pub trait IntoCoro: Sized {
 impl<F, S, R, Fut, O> From<F> for ReadyCoro<S, R, O, Fut>
 where
     F: FnOnce(Handle<S, R>) -> Fut,
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
     Fut: Future<Output = O>,
 {
@@ -164,7 +164,10 @@ static WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 #[derive(Debug, Clone)]
-struct SharedState<S, R> {
+struct SharedState<S, R>
+where
+    S: 'static,
+{
     s: Option<S>,
     r: Option<R>,
 }
@@ -233,7 +236,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 ///     initial: T,
 /// }
 ///
-/// impl<T: Unpin > IntoCoro for Echo<T> {
+/// impl<T: Unpin + 'static> IntoCoro for Echo<T> {
 ///     type Snd = T;
 ///     type Rcv = T;
 ///     type Out = ();
@@ -302,7 +305,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 /// ```
 pub struct Coro<S, R, O, F, L>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
     F: Future<Output = O>,
     L: Lifecycle,
@@ -504,7 +507,7 @@ where
 #[must_use]
 pub enum CoroState<S, R, T, F>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
     F: Future<Output = T>,
 {
@@ -518,7 +521,7 @@ where
 
 impl<S, R, T, F> CoroState<S, R, T, F>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
     F: Future<Output = T>,
 {
@@ -639,7 +642,7 @@ pub type HandOwl = Handle<(), ()>;
 
 impl<S, R> Clone for Handle<S, R>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
 {
     fn clone(&self) -> Self {
@@ -649,14 +652,14 @@ where
 
 impl<S, R> Copy for Handle<S, R>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
 {
 }
 
 impl<S, R> Handle<S, R>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
 {
     /// Yield back to the code that owns the [Coro] calling this method, requesting it to
@@ -770,7 +773,7 @@ where
 
 struct Yield<S, R>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
 {
     polled: bool,
@@ -780,7 +783,7 @@ where
 
 impl<S, R> Future for Yield<S, R>
 where
-    S: Unpin,
+    S: Unpin + 'static,
     R: Unpin,
 {
     type Output = R;
@@ -995,6 +998,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     #[should_panic = "a Coro is not permitted to await a future that uses an arbitrary Waker"]
     async fn awaiting_a_future_that_needs_a_waker_panics() {
         let _ = tokio_boom().resume();
@@ -1013,7 +1017,7 @@ mod tests {
         initial: T,
     }
 
-    impl<T: Unpin> IntoCoro for Echo<T> {
+    impl<T: Unpin + 'static> IntoCoro for Echo<T> {
         type Snd = T;
         type Rcv = T;
         type Out = ();
@@ -1098,8 +1102,8 @@ mod tests {
         Ok(buf)
     }
 
-    #[tokio::test]
-    async fn nested_yield_from_works() {
+    #[test]
+    fn nested_yield_from_works() {
         use std::io::Read;
 
         let mut coro = Coro::from(read_9p_string_vec);
@@ -1121,6 +1125,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore)]
     async fn nested_yield_from_works_with_async() {
         use tokio::io::AsyncReadExt;
 

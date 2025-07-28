@@ -66,3 +66,17 @@ jobs:
       with:
         rust-version: nightly
     - run: cargo rustdoc --all-features
+
+  miri:
+    name: "Miri"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+      - name: Test with Miri
+        # Stacked borrows are how this whole thing works...
+        run: MIRIFLAGS="-Zmiri-disable-stacked-borrows" cargo miri test
