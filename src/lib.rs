@@ -62,7 +62,7 @@ pub trait AsCoro {
     type Out;
 
     /// Return a future that can be executed by calling [AsCoro::as_coro] to convert this type into
-    /// a [Coro] that can be run to completeion.
+    /// a [Coro] that can be run to completion.
     ///
     /// # Panics
     /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
@@ -114,7 +114,7 @@ pub trait IntoCoro: Sized {
     type Out;
 
     /// Provide a future that can be executed by calling [IntoCoro::into_coro] to convert this type
-    /// into a [Coro] that can be run to completeion.
+    /// into a [Coro] that can be run to completion.
     ///
     /// # Panics
     /// Calls to async methods or functions that attempt to make use of a [Waker] will panic.
@@ -124,6 +124,24 @@ pub trait IntoCoro: Sized {
     fn into_coro(
         self,
     ) -> ReadyCoro<Self::Snd, Self::Rcv, Self::Out, impl Future<Output = Self::Out>> {
+        Coro {
+            _lifecycle: Ready,
+            state: SharedState::default(),
+            fut: Box::pin(self.into_coro_fn(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
+
+    /// Initialize a new [Coro] with a type erased `Future` from a value.
+    fn into_dyn_coro(
+        self,
+    ) -> ReadyCoro<Self::Snd, Self::Rcv, Self::Out, dyn Future<Output = Self::Out>>
+    where
+        Self: 'static,
+        Self::Out: 'static,
+    {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -144,6 +162,37 @@ where
     Fut: Future<Output = O>,
 {
     fn from(f: F) -> Self {
+        Coro {
+            _lifecycle: Ready,
+            state: SharedState::default(),
+            fut: Box::pin((f)(Handle {
+                _snd: PhantomData,
+                _rcv: PhantomData,
+            })),
+        }
+    }
+}
+
+impl<S, R, O> ReadyCoro<S, R, O, dyn Future<Output = O>>
+where
+    S: Unpin + 'static,
+    R: Unpin,
+{
+    /// Create a new [Coro] with a type erased `Future`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use simple_coro::{ReadyCoro, Handle};
+    /// let coro: ReadyCoro<usize, bool, &'static str, dyn Future<Output = _>> = ReadyCoro::from_dyn(|handle: Handle<usize, bool>| async move {
+    ///     let result = handle.yield_value(42).await;
+    ///     if result { "yes" } else { "no" }
+    /// });
+    /// ```
+    pub fn from_dyn<F, Fut>(f: F) -> Self
+    where
+        F: FnOnce(Handle<S, R>) -> Fut,
+        Fut: Future<Output = O> + 'static,
+    {
         Coro {
             _lifecycle: Ready,
             state: SharedState::default(),
@@ -303,7 +352,7 @@ pub type PendingCoro<S, R, O, F> = Coro<S, R, O, F, Pending>;
 ///
 /// assert_eq!(s, "Hello, 世界");
 /// ```
-pub struct Coro<S, R, O, F, L>
+pub struct Coro<S, R, O, F: ?Sized, L>
 where
     S: Unpin + 'static,
     R: Unpin,
@@ -315,7 +364,7 @@ where
     fut: Pin<Box<F>>,
 }
 
-impl<S, R, O, F, L> fmt::Debug for Coro<S, R, O, F, L>
+impl<S, R, O, F: ?Sized, L> fmt::Debug for Coro<S, R, O, F, L>
 where
     S: Unpin,
     R: Unpin,
@@ -329,7 +378,7 @@ where
     }
 }
 
-impl<S, R, O, Fut> Coro<S, R, O, Fut, Ready>
+impl<S, R, O, Fut: ?Sized> Coro<S, R, O, Fut, Ready>
 where
     S: Unpin,
     R: Unpin,
@@ -419,7 +468,7 @@ where
     }
 }
 
-impl<S, R, O, F> Coro<S, R, O, F, Pending>
+impl<S, R, O, F: ?Sized> Coro<S, R, O, F, Pending>
 where
     S: Unpin,
     R: Unpin,
@@ -472,7 +521,7 @@ where
 /// ```
 pub type Generator<T, F> = Coro<T, (), (), F, Ready>;
 
-impl<T, F> Iterator for Generator<T, F>
+impl<T, F: ?Sized> Iterator for Generator<T, F>
 where
     T: Unpin,
     F: Future<Output = ()>,
@@ -505,7 +554,7 @@ where
 /// The intermediate state of a [Coro] while it is executing
 #[derive(Debug)]
 #[must_use]
-pub enum CoroState<S, R, T, F>
+pub enum CoroState<S, R, T, F: ?Sized>
 where
     S: Unpin + 'static,
     R: Unpin,
@@ -519,7 +568,7 @@ where
     Complete(T),
 }
 
-impl<S, R, T, F> CoroState<S, R, T, F>
+impl<S, R, T, F: ?Sized> CoroState<S, R, T, F>
 where
     S: Unpin + 'static,
     R: Unpin,
@@ -896,7 +945,7 @@ mod tests {
     #[should_panic = "this future must be awaited inside of a Coro"]
     fn manually_polling_yield_panics() {
         let coro = Coro::from(async |handle: Handle<()>| {
-            let mut fut = handle.yield_value(());
+            let fut = handle.yield_value(());
             let waker = Waker::noop();
             let mut cx = Context::from_waker(waker);
 
@@ -904,6 +953,23 @@ mod tests {
         });
 
         let _ = coro.resume();
+    }
+
+    #[test]
+    fn dyn_future_type_works() {
+        let coro = Coro::from_dyn(|handle: Handle<usize, bool>| async move {
+            assert!(handle.yield_value(42).await);
+            "hello, dyn world!"
+        });
+
+        let mut coro = coro;
+        coro = coro.resume().unwrap_pending(|n| {
+            assert_eq!(n, 42);
+            true
+        });
+
+        let s = coro.resume().unwrap();
+        assert_eq!(s, "hello, dyn world!");
     }
 
     // Trying to write double_nums as a closure that returns a Coro results in lifetime errors
