@@ -1,6 +1,6 @@
 [package]
 name = "simple_coro"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 authors = ["sminez <innes.andersonmorrison@gmail.com>"]
 license = "MIT"
@@ -23,3 +23,4 @@ include = [
 [dev-dependencies]
 simple_test_case = "1"
 tokio =  { version = "1.43.0", features = ["macros", "net", "io-util", "rt", "sync", "time", "rt-multi-thread", "net", "io-util"] }
+tokio-test = "0.4.5"

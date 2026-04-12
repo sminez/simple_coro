@@ -385,8 +385,7 @@ where
     Fut: Future<Output = O>,
 {
     /// Run this [Coro] to completion using the provided synchronous step function. If you need to
-    /// make use of an asynchronous step function you will need to write out the equivalent loop by
-    /// hand.
+    /// make use of an asynchronous step function you should use [run_async][Coro::run_async].
     ///
     /// # Example
     /// ```rust
@@ -429,6 +428,58 @@ where
             coro = match coro.resume() {
                 CoroState::Complete(res) => return res,
                 CoroState::Pending(c, s) => c.send((step_fn)(s)),
+            };
+        }
+    }
+
+    /// Run this [Coro] to completion using the provided asynchronous step function. If you want to
+    /// make use of an synchronous step function you should use [run_sync][Coro::run_sync].
+    ///
+    /// # Example
+    /// ```rust
+    /// # use simple_coro::{Coro, Handle};
+    /// # tokio_test::block_on(async {
+    /// let my_coro = Coro::from(async |handle: Handle<usize, Option<usize>>| {
+    ///     let pos = handle.yield_value(42).await;
+    ///     assert_eq!(pos, Some(5));
+    ///     let pos = handle.yield_value(17).await;
+    ///     assert_eq!(pos, Some(2));
+    ///     let pos = handle.yield_value(68).await;
+    ///     assert!(pos.is_none());
+    ///
+    ///     "done"
+    /// });
+    ///
+    /// let vec = vec![5, 3, 17, 29, 103, 42, 55];
+    /// let res = my_coro.run_async(async |n| vec.iter().position(|&x| x == n)).await;
+    /// assert_eq!(res, "done");
+    /// # })
+    /// ```
+    ///
+    /// Equivalent to:
+    /// ```rust
+    /// # use simple_coro::{Coro, CoroState, HandOwl};
+    /// # tokio_test::block_on(async {
+    /// # let my_coro = Coro::from(async |_: HandOwl| {});
+    /// # let step_fn = async |unit| unit;
+    /// let mut coro = my_coro;
+    /// loop {
+    ///     coro = match coro.resume() {
+    ///         CoroState::Complete(res) => return res,
+    ///         CoroState::Pending(c, s) => c.send((step_fn)(s).await),
+    ///     };
+    /// }
+    /// # })
+    /// ```
+    pub async fn run_async<F>(self, mut step_fn: F) -> O
+    where
+        F: AsyncFnMut(S) -> R,
+    {
+        let mut coro = self;
+        loop {
+            coro = match coro.resume() {
+                CoroState::Complete(res) => return res,
+                CoroState::Pending(c, s) => c.send((step_fn)(s).await),
             };
         }
     }
@@ -1004,6 +1055,12 @@ mod tests {
     #[test]
     fn run_sync_works() {
         let res = double_nums(&[1, 2, 3]).run_sync(|n| n * 2);
+        assert_eq!(res, "done");
+    }
+
+    #[tokio::test]
+    async fn run_async_works() {
+        let res = double_nums(&[1, 2, 3]).run_async(async |n| n * 2).await;
         assert_eq!(res, "done");
     }
 
